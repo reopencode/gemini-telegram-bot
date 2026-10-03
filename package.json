@@ -1,0 +1,34 @@
+{
+  "name": "gemini-telegram-bot",
+  "version": "1.0.0",
+  "description": "Personal Telegram bot + Mini App proxying to Gemini web session",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:bridge": "node scripts/start-bridge.mjs",
+    "extract-cookies": "node scripts/extract-cookies.mjs",
+    "tunnel": "node scripts/tunnel.mjs",
+    "export-live-cookies": "node scripts/export-live-cookies.mjs",
+    "watch": "bash scripts/supervise-watchdog.sh",
+    "watchdog": "bash scripts/watchdog.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.5",
+    "express": "^5.2.1",
+    "grammy": "^1.46.0",
+    "multer": "^2.4.0",
+    "uuid": "^14.0.2",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "localtunnel": "^2.0.2"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  }
+}

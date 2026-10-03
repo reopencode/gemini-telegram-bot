@@ -1,0 +1,16 @@
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+data/private-video/
+data/allowlist.json
+data/prefs.json
+.cookies.json
+.cookies.full.json
+.cookies-seed.json
+chrome-profile-gemini/
+*.log
+.DS_Store
+.env
+.cookies.full.json
+.webapp_url

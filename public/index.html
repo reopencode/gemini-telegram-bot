@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Gemini</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="spark" aria-hidden="true"></div>
+        <div>
+          <div class="title">Gemini</div>
+          <div class="subtitle" id="status">Connecting…</div>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="btnAdmin" class="ghost hidden" type="button" title="Admin">Admin</button>
+        <button id="btnTools" class="ghost" type="button" title="Tools">Tools</button>
+        <button id="btnModel" class="ghost model-chip" type="button" title="Model">Model</button>
+        <button id="btnNew" class="ghost" type="button" title="New chat">New</button>
+      </div>
+    </header>
+
+    <main id="messages" class="messages" aria-live="polite"></main>
+
+    <div id="attachPreview" class="attach-preview hidden"></div>
+    <div id="toolChips" class="tool-chips hidden" aria-label="Active tools"></div>
+
+    <footer class="composer">
+      <form id="form" autocomplete="off">
+        <div class="input-wrap">
+          <button id="btnAttach" class="icon-btn" type="button" title="Add files" aria-label="Attach">+</button>
+          <input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.py,.js,.ts,.html,.css,.log" multiple hidden />
+          <textarea id="input" rows="1" placeholder="Ask Gemini" enterkeyhint="send"></textarea>
+          <button id="send" type="submit" aria-label="Send">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a1 1 0 00-1.39 1.16l2.2 6.74L12 12l-7.79.5-2.2 6.74a1 1 0 001.39 1.16z"/></svg>
+          </button>
+        </div>
+      </form>
+    </footer>
+  </div>
+
+  <div id="sheet" class="sheet hidden" role="dialog" aria-modal="true">
+    <div class="sheet-backdrop" id="sheetBackdrop"></div>
+    <div class="sheet-panel">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title" id="sheetTitle">Options</div>
+      <div class="sheet-body" id="sheetBody"></div>
+    </div>
+  </div>
+
+  <div id="authGate" class="auth-gate hidden">
+    <div class="auth-card">
+      <h1>Not authorized</h1>
+      <p id="authGateMsg">Open this Mini App from Telegram as an allowlisted user.</p>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

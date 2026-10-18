@@ -46,6 +46,33 @@ export function geminiWebapiCache() {
   return process.env.GEMINI_WEBAPI_CACHE || '/tmp/gemini_webapi';
 }
 
+export function historyPath() {
+  const raw = (process.env.HISTORY_PATH || '').trim();
+  if (raw) return path.resolve(raw);
+  return path.join(ROOT, 'data', 'history.json');
+}
+
+function positiveInt(name, fallback, { max } = {}) {
+  const n = Math.floor(Number(process.env[name]));
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return max ? Math.min(n, max) : n;
+}
+
+/**
+ * Chat history limits. Read on each call so a changed env value applies without a restart
+ * of the test process; unset or invalid values fall back to the defaults below.
+ */
+export function historySettings() {
+  return {
+    maxChats: positiveInt('HISTORY_MAX_CHATS', 50),
+    maxMessageChars: positiveInt('HISTORY_MAX_MESSAGE_CHARS', 20000),
+    titleChars: positiveInt('HISTORY_TITLE_CHARS', 40),
+    listLimit: positiveInt('HISTORY_LIST_LIMIT', 20),
+    // Header + footer + page text must stay inside Telegram's 4096-character message limit.
+    pageChars: positiveInt('HISTORY_PAGE_CHARS', 3600, { max: 3800 }),
+  };
+}
+
 export function allowlistPath() {
   const raw = (process.env.ALLOWLIST_PATH || '').trim();
   if (raw) return path.resolve(raw);

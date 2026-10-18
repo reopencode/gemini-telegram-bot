@@ -48,6 +48,17 @@ body { overflow: hidden; }
   background: transparent; color: var(--accent); border: 1px solid var(--border);
   border-radius: 999px; padding: 6px 10px; cursor: pointer; font-size: 12px;
 }
+.history-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 8px 14px; border-bottom: 1px solid var(--border);
+  background: #1e1f20; font-size: 12px; color: var(--muted);
+}
+.history-banner.hidden { display: none; }
+/* Read-only archive view: banner row appears, composer is gone so nothing can be sent. */
+.app.viewing-history { grid-template-rows: auto auto 1fr; }
+.app.viewing-history .composer,
+.app.viewing-history .tool-chips,
+.app.viewing-history .attach-preview { display: none !important; }
 .model-chip { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .messages {

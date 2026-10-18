@@ -12,6 +12,8 @@ import {
   getPrefs,
   setPrefs,
 } from './geminiClient.js';
+import { listChats, getChat, formatTranscript } from './history.js';
+import { historySettings } from './env.js';
 import { refreshGeminiCookies } from './refreshCookies.js';
 import {
   isTelegramUserAllowed,
@@ -240,6 +242,17 @@ export function splitTelegramText(text, limit = 4096) {
   return parts.filter((p) => p.length > 0);
 }
 
+function formatHistoryDate(ts) {
+  const d = new Date(ts || Date.now());
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+/** Transcript split into pages that fit one Telegram message together with the header. */
+export function paginateTranscript(chat) {
+  const pages = splitTelegramText(formatTranscript(chat), historySettings().pageChars);
+  return pages.length ? pages : ['(empty chat)'];
+}
+
 const STREAM_EDIT_INTERVAL_MS = 1000;
 const STREAM_PLACEHOLDER = '…';
 
@@ -428,8 +441,9 @@ export function createBot(options = {}) {
   function replyKeyboard(ctx) {
     const keyboard = [
       ['Model', 'Tools'],
-      ['New chat', 'Status'],
-      ['Fix', 'Open app'],
+      ['New chat', 'History'],
+      ['Status', 'Fix'],
+      ['Open app'],
     ];
     if (isAdmin(ctx.from)) keyboard.push(['Admin']);
     return {
@@ -509,6 +523,52 @@ export function createBot(options = {}) {
     return ctx.reply(text, { ...options, reply_markup: replyKeyboard(ctx) });
   }
 
+  /** Reset Gemini's context; resetSession archives the old chat as read-only history. */
+  async function startNewChat(ctx) {
+    const before = listChats(sid(ctx)).length;
+    await resetSession(sid(ctx));
+    const saved = listChats(sid(ctx)).length > before;
+    return saved
+      ? 'Fresh chat ready — your previous chat is saved in History. Send me a message whenever you’re ready.'
+      : 'Fresh chat ready — send me a message whenever you’re ready.';
+  }
+
+  function historyListView(ctx) {
+    const chats = listChats(sid(ctx));
+    if (!chats.length) {
+      return { text: 'No past chats yet. When you start a new chat, the old one is saved here.' };
+    }
+    const kb = new InlineKeyboard();
+    for (const c of chats.slice(0, historySettings().listLimit)) {
+      kb.text(`${formatHistoryDate(c.endedAt)} · ${c.title}`, `hist:o:${c.id}:0`).row();
+    }
+    return {
+      text: 'Your past chats — tap one to read it. Archived chats are read-only.',
+      reply_markup: kb,
+    };
+  }
+
+  async function sendHistoryList(ctx) {
+    const view = historyListView(ctx);
+    await ctx.reply(view.text, view.reply_markup ? { reply_markup: view.reply_markup } : {});
+  }
+
+  /** Read-only page of an archived chat, scoped to the caller's own session. */
+  function historyChatView(ctx, chatId, page) {
+    const chat = getChat(sid(ctx), chatId);
+    if (!chat) return null;
+    const pages = paginateTranscript(chat);
+    const idx = Math.min(Math.max(Number(page) || 0, 0), pages.length - 1);
+    const header = `Archived chat · read-only\n${chat.title} · ${formatHistoryDate(chat.endedAt)}`;
+    const footer = pages.length > 1 ? `\n\nPage ${idx + 1}/${pages.length}` : '';
+    const kb = new InlineKeyboard();
+    if (idx > 0) kb.text('‹ Prev', `hist:o:${chat.id}:${idx - 1}`);
+    if (idx < pages.length - 1) kb.text('Next ›', `hist:o:${chat.id}:${idx + 1}`);
+    if (idx > 0 || idx < pages.length - 1) kb.row();
+    kb.text('‹ Back to list', 'hist:l');
+    return { text: `${header}\n\n${pages[idx]}${footer}`, reply_markup: kb };
+  }
+
   // Gate every update before any handler
   bot.use(async (ctx, next) => {
     const from = ctx.from;
@@ -535,7 +595,8 @@ export function createBot(options = {}) {
       'Quick actions:',
       '• /model — pick Flash / Pro',
       '• /tools — Thinking, Image, Video, Music…',
-      '• /new — start a fresh chat',
+      '• /new — start a fresh chat (the old one is saved)',
+      '• /history — read your past chats (read-only)',
       '• /status — what’s on right now',
       '• /fix — diagnose if the bot isn’t answering',
     ];
@@ -648,8 +709,11 @@ export function createBot(options = {}) {
   });
 
   bot.command('new', async (ctx) => {
-    await resetSession(sid(ctx));
-    await ctx.reply('Fresh chat ready — send me a message whenever you’re ready.');
+    await ctx.reply(await startNewChat(ctx), { reply_markup: replyKeyboard(ctx) });
+  });
+
+  bot.command('history', async (ctx) => {
+    await sendHistoryList(ctx);
   });
 
   bot.command('status', async (ctx) => {
@@ -728,6 +792,27 @@ export function createBot(options = {}) {
         await setPrefs(session, { model: model || '' });
         await ctx.answerCallbackQuery({ text: model ? `Using ${model}` : 'Using the account default' });
         await ctx.editMessageText(`Model ready: ${model || 'account default'}`);
+        return;
+      }
+      if (data === 'hist:l') {
+        const view = historyListView(ctx);
+        await ctx.answerCallbackQuery();
+        await ctx.editMessageText(view.text, view.reply_markup ? { reply_markup: view.reply_markup } : {});
+        return;
+      }
+      if (data.startsWith('hist:o:')) {
+        const [, , chatId, page] = data.split(':');
+        const view = historyChatView(ctx, chatId, page);
+        if (!view) {
+          await ctx.answerCallbackQuery({ text: 'Chat not found', show_alert: true });
+          return;
+        }
+        await ctx.answerCallbackQuery();
+        try {
+          await ctx.editMessageText(view.text, { reply_markup: view.reply_markup });
+        } catch (e) {
+          if (!isNotModified(e)) throw e;
+        }
         return;
       }
       if (data.startsWith('chip:')) {
@@ -956,8 +1041,11 @@ export function createBot(options = {}) {
   });
 
   bot.hears('New chat', async (ctx) => {
-    await resetSession(sid(ctx));
-    await replyWithMenu(ctx, 'Fresh chat ready — send me a message whenever you’re ready.');
+    await replyWithMenu(ctx, await startNewChat(ctx));
+  });
+
+  bot.hears('History', async (ctx) => {
+    await sendHistoryList(ctx);
   });
 
   bot.hears('Status', async (ctx) => {

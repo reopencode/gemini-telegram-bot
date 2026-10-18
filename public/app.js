@@ -175,6 +175,86 @@ import { appendReplyContent } from './videoReply.js';
   function closeSheet() { sheet.classList.add('hidden'); }
   sheetBackdrop.addEventListener('click', closeSheet);
 
+  // Read-only archive view. The live chat DOM is parked and restored on exit.
+  const appEl = document.querySelector('.app');
+  const btnHistory = document.getElementById('btnHistory');
+  const historyBanner = document.getElementById('historyBanner');
+  const historyBannerText = document.getElementById('historyBannerText');
+  const btnHistoryBack = document.getElementById('btnHistoryBack');
+  let viewingHistory = false;
+  let parkedMessages = null;
+
+  function formatDate(ts) {
+    return new Date(ts || Date.now()).toLocaleDateString();
+  }
+
+  function exitHistory() {
+    if (!viewingHistory) return;
+    viewingHistory = false;
+    messagesEl.innerHTML = '';
+    if (parkedMessages) messagesEl.append(...parkedMessages);
+    else showWelcome();
+    parkedMessages = null;
+    appEl.classList.remove('viewing-history');
+    historyBanner.classList.add('hidden');
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  async function openArchivedChat(id) {
+    const { chat } = await api(`/api/history/${encodeURIComponent(id)}`);
+    if (!viewingHistory) parkedMessages = Array.from(messagesEl.childNodes);
+    viewingHistory = true;
+    messagesEl.innerHTML = '';
+    for (const m of chat.messages || []) {
+      addBubble(m.role === 'user' ? 'user' : 'ai', m.text || '');
+    }
+    messagesEl.scrollTop = 0;
+    historyBannerText.textContent = `Archived chat · read-only · ${formatDate(chat.endedAt)}`;
+    historyBanner.classList.remove('hidden');
+    appEl.classList.add('viewing-history');
+  }
+
+  async function renderHistorySheet(root) {
+    root.innerHTML = '<p class="desc">Loading…</p>';
+    try {
+      const { chats } = await api('/api/history');
+      root.innerHTML = '';
+      if (!chats.length) {
+        root.innerHTML = '<p class="desc">No past chats yet. When you start a new chat, the old one is saved here.</p>';
+        return;
+      }
+      for (const c of chats) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'option';
+        const label = document.createElement('div');
+        label.className = 'label';
+        label.textContent = c.title;
+        const desc = document.createElement('div');
+        desc.className = 'desc';
+        desc.textContent = `${formatDate(c.endedAt)} · ${c.count} messages`;
+        const wrap = document.createElement('div');
+        wrap.append(label, desc);
+        btn.appendChild(wrap);
+        btn.addEventListener('click', async () => {
+          try {
+            await openArchivedChat(c.id);
+            closeSheet();
+          } catch (e) {
+            desc.textContent = String(e.message || e);
+          }
+        });
+        root.appendChild(btn);
+      }
+    } catch (e) {
+      root.innerHTML = '';
+      const p = document.createElement('p');
+      p.className = 'desc';
+      p.textContent = String(e.message || e);
+      root.appendChild(p);
+    }
+  }
+
   async function bootstrapAuth() {
     if (!initData) {
       showAuthGate('Open this Mini App from the Telegram bot (missing initData).');
@@ -423,7 +503,7 @@ import { appendReplyContent } from './videoReply.js';
   }
 
   async function handleSend(prompt) {
-    if (!authed || busy) return;
+    if (!authed || busy || viewingHistory) return;
     if (!prompt && !pendingFiles.length) return;
     setBusy(true);
     const files = pendingFiles.slice();
@@ -472,8 +552,15 @@ import { appendReplyContent } from './videoReply.js';
     input.style.height = Math.min(input.scrollHeight, 140) + 'px';
   });
 
+  btnHistory.addEventListener('click', () => {
+    if (!authed || busy) return;
+    openSheet('Past chats', (root) => { renderHistorySheet(root); });
+  });
+  btnHistoryBack.addEventListener('click', exitHistory);
+
   btnNew.addEventListener('click', async () => {
     if (!authed || busy) return;
+    exitHistory();
     setBusy(true);
     try {
       if (!useHttp && ws && ws.readyState === WebSocket.OPEN) {

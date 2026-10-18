@@ -14,3 +14,4 @@ chrome-profile-gemini/
 .env
 .cookies.full.json
 .webapp_url
+data/history.json

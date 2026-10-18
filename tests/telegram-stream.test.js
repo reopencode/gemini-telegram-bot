@@ -16,6 +16,7 @@ const allowlistPath = path.join(root, 'data', 'allowlist.json');
 const allowlistExisted = fs.existsSync(allowlistPath);
 const allowlistBackup = allowlistExisted ? fs.readFileSync(allowlistPath, 'utf8') : null;
 process.env.PERMANENT_ADMINS = 'tester';
+process.env.HISTORY_PATH = path.join(os.tmpdir(), `telegram-stream-history-${process.pid}.json`);
 
 const state = {
   mode: 'stream-ok',

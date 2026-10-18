@@ -61,6 +61,12 @@ Mini App: the admin sheet can allow/deny by `@username` or numeric user id. All 
 | `GEMINI_COOKIE_SEED` | no | Plaintext cookie seed (default `/home/box/sand-data/chrome-cookie-seed.json`) |
 | `CHROME_COOKIE_DBS` | no | `os.pathsep`-separated Chromium `Cookies` DBs to try decrypting |
 | `ALLOWLIST_PATH` | no | Allowlist JSON (default `data/allowlist.json`) |
+| `HISTORY_PATH` | no | Archived chat history JSON (default `data/history.json`; local only — gitignored) |
+| `HISTORY_MAX_CHATS` | no | Archived chats kept per user; oldest are dropped (default `50`) |
+| `HISTORY_MAX_MESSAGE_CHARS` | no | Max stored characters per message (default `20000`) |
+| `HISTORY_TITLE_CHARS` | no | Max characters of a past chat's title (default `40`) |
+| `HISTORY_LIST_LIMIT` | no | Past chats shown in the bot's History list (default `20`) |
+| `HISTORY_PAGE_CHARS` | no | Transcript characters per bot page (default `3600`, capped at `3800` for Telegram's 4096 limit) |
 | `PYTHON` | no | Python used to launch the bridge (default `.venv/bin/python`) |
 | `EXEC_NODE` | no | Node binary for live cookie export (default `/exec-daemon/node`, else the current Node) |
 | `GEMINI_WEBAPI_CACHE` | no | Cache dir cleared on cookie refresh (default `/tmp/gemini_webapi`) |
@@ -203,6 +209,7 @@ gemini-telegram-bot/
   src/bot.js            # Telegram (grammy)
   src/server.js         # Express + WebSocket Mini App API
   src/geminiClient.js   # HTTP client → Python bridge
+  src/history.js        # archived (read-only) chat transcripts
   gemini_bridge.py      # FastAPI + gemini_webapi
   envfile.py            # .env loader for Python (does not override existing vars)
   scripts/extract_cookies.py

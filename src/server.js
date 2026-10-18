@@ -15,6 +15,7 @@ import {
   setPrefs,
   resetSession,
 } from './geminiClient.js';
+import { listChats, getChat } from './history.js';
 import { validateWebAppInitData, authSummary, isAdmin, allowTarget, denyTarget, listAllowlist } from './auth.js';
 import { httpListen } from './env.js';
 
@@ -159,6 +160,17 @@ export function createApp() {
     } catch (e) {
       res.status(502).json({ error: String(e.message || e) });
     }
+  });
+
+  // Archived chats are read-only and scoped to the caller's own session id.
+  app.get('/api/history', requireMiniAppAuth, (req, res) => {
+    res.json({ chats: listChats(req.tgSessionId) });
+  });
+
+  app.get('/api/history/:id', requireMiniAppAuth, (req, res) => {
+    const chat = getChat(req.tgSessionId, req.params.id);
+    if (!chat) return res.status(404).json({ error: 'chat not found' });
+    res.json({ chat });
   });
 
   app.get('/api/me', requireMiniAppAuth, (req, res) => {

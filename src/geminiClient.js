@@ -2,6 +2,18 @@
  * Thin HTTP client for the local Python gemini_bridge.
  */
 import { bridgeSettings } from './env.js';
+import { recordTurn, archiveActive } from './history.js';
+
+/** Archive bookkeeping must never break a chat turn. */
+function safeRecord(sessionId, userText, result, extra = '') {
+  try {
+    const media = (result?.media || []).map((m) => m?.type).filter(Boolean);
+    const user = [String(userText || '').trim(), extra].filter(Boolean).join('\n');
+    recordTurn(sessionId, user, result?.text, media);
+  } catch (e) {
+    console.warn('[history] record failed', String(e?.message || e).slice(0, 160));
+  }
+}
 
 function bridgeUrl() {
   return bridgeSettings().url;
@@ -51,6 +63,7 @@ export async function chat(prompt, sessionId = 'default', { model, tools, thinki
     const detail = data.detail || data.error || res.statusText;
     throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
   }
+  safeRecord(sessionId, prompt, data);
   return data;
 }
 
@@ -72,6 +85,8 @@ export async function chatWithFiles(prompt, sessionId, files, { model, tools, th
     const detail = data.detail || data.error || res.statusText;
     throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
   }
+  const names = (files || []).map((f) => `[file: ${f.filename || 'upload'}]`).join(' ');
+  safeRecord(sessionId || 'default', prompt, data, names);
   return data;
 }
 
@@ -176,7 +191,7 @@ export async function chatStream(prompt, sessionId = 'default', { model, tools, 
     throw err;
   }
 
-  return {
+  const out = {
     text: finalEvent.text || '',
     session_id: finalEvent.session_id || sessionId,
     model: finalEvent.model ?? model ?? null,
@@ -184,9 +199,17 @@ export async function chatStream(prompt, sessionId = 'default', { model, tools, 
     thinking_level: finalEvent.thinking_level ?? thinkingLevel ?? null,
     media: Array.isArray(finalEvent.media) ? finalEvent.media : [],
   };
+  safeRecord(sessionId, prompt, out);
+  return out;
 }
 
 export async function resetSession(sessionId = 'default') {
+  // Keep the finished conversation as a read-only archive before clearing Gemini's context.
+  try {
+    archiveActive(sessionId);
+  } catch (e) {
+    console.warn('[history] archive failed', String(e?.message || e).slice(0, 160));
+  }
   const res = await fetch(`${bridgeUrl()}/reset?session_id=${encodeURIComponent(sessionId)}`, {
     method: 'POST',
   });

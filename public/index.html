@@ -21,9 +21,15 @@
         <button id="btnAdmin" class="ghost hidden" type="button" title="Admin">Admin</button>
         <button id="btnTools" class="ghost" type="button" title="Tools">Tools</button>
         <button id="btnModel" class="ghost model-chip" type="button" title="Model">Model</button>
+        <button id="btnHistory" class="ghost" type="button" title="Past chats">History</button>
         <button id="btnNew" class="ghost" type="button" title="New chat">New</button>
       </div>
     </header>
+
+    <div id="historyBanner" class="history-banner hidden">
+      <span id="historyBannerText">Archived chat · read-only</span>
+      <button id="btnHistoryBack" class="ghost" type="button">Back to current chat</button>
+    </div>
 
     <main id="messages" class="messages" aria-live="polite"></main>
 

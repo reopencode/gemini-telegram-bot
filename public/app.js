@@ -36,7 +36,21 @@ import { appendReplyContent } from './videoReply.js';
   let useHttp = false;
   let models = [];
   let toolsCatalog = [];
-  let prefs = { model: null, tools: {} };
+  let prefs = { model: null, tools: {}, thinking_level: 'medium' };
+  const THINKING_LEVELS = ['low', 'medium', 'high'];
+
+  function thinkingLevel() {
+    return THINKING_LEVELS.includes(prefs.thinking_level) ? prefs.thinking_level : 'medium';
+  }
+
+  function levelLabel(level) {
+    return level.charAt(0).toUpperCase() + level.slice(1);
+  }
+
+  function toolLabelFor(id, fallback) {
+    const base = fallback || id;
+    return id === 'extended_thinking' ? `${base} · ${levelLabel(thinkingLevel())}` : base;
+  }
   let pendingFiles = [];
   let isAdminUser = false;
   let authed = false;
@@ -151,7 +165,7 @@ import { appendReplyContent } from './videoReply.js';
       btn.type = 'button';
       btn.className = 'tool-chip ' + ((meta && meta.kind) || (id.startsWith('create_') ? 'media' : 'flag'));
       btn.title = 'Tap to turn off';
-      btn.innerHTML = `<span>${TOOL_LABELS[id] || meta?.label || id}</span><span class="x" aria-hidden="true">×</span>`;
+      btn.innerHTML = `<span>${toolLabelFor(id, TOOL_LABELS[id] || meta?.label)}</span><span class="x" aria-hidden="true">×</span>`;
       btn.addEventListener('click', async () => {
         const next = { ...(prefs.tools || {}) };
         next[id] = false;
@@ -160,7 +174,7 @@ import { appendReplyContent } from './videoReply.js';
       toolChips.appendChild(btn);
     }
     // Also mirror in status subtitle
-    const labels = active.map((id) => TOOL_LABELS[id] || id);
+    const labels = active.map((id) => toolLabelFor(id, TOOL_LABELS[id]));
     statusEl.textContent = (statusEl.dataset.base || 'Online') + ' · ' + labels.join(' · ');
   }
 
@@ -218,7 +232,7 @@ import { appendReplyContent } from './videoReply.js';
     refreshChrome();
     renderToolChips();
     if (!useHttp && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'prefs', model: prefs.model, tools: prefs.tools }));
+      ws.send(JSON.stringify({ type: 'prefs', model: prefs.model, tools: prefs.tools, thinking_level: prefs.thinking_level }));
     }
   }
 
@@ -261,7 +275,33 @@ import { appendReplyContent } from './videoReply.js';
         renderToolsSheet(sheetBody);
       });
       root.appendChild(row);
+      if (tool.id === 'extended_thinking' && on) root.appendChild(renderThinkingLevels());
     }
+  }
+
+  function renderThinkingLevels() {
+    const wrap = document.createElement('div');
+    wrap.className = 'level-row';
+    const cur = thinkingLevel();
+    const lbl = document.createElement('div');
+    lbl.className = 'desc';
+    lbl.textContent = 'Thinking level';
+    const seg = document.createElement('div');
+    seg.className = 'segmented';
+    for (const l of THINKING_LEVELS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'seg' + (l === cur ? ' on' : '');
+      b.textContent = levelLabel(l);
+      b.addEventListener('click', async () => {
+        await savePrefs({ thinking_level: l });
+        sheetBody.innerHTML = '';
+        renderToolsSheet(sheetBody);
+      });
+      seg.appendChild(b);
+    }
+    wrap.append(lbl, seg);
+    return wrap;
   }
 
   async function renderAdminSheet(root) {
@@ -405,6 +445,7 @@ import { appendReplyContent } from './videoReply.js';
       if (prefs.model) fd.append('model', prefs.model);
       fd.append('tools', JSON.stringify(prefs.tools || {}));
       fd.append('tools_json', JSON.stringify(prefs.tools || {}));
+      fd.append('thinking_level', thinkingLevel());
       for (const f of files) fd.append('files', f, f.name);
       const res = await fetch('/api/chat_upload', {
         method: 'POST',
@@ -417,7 +458,7 @@ import { appendReplyContent } from './videoReply.js';
     }
     const data = await api('/api/chat', {
       method: 'POST',
-      json: { prompt, model: prefs.model, tools: prefs.tools, initData },
+      json: { prompt, model: prefs.model, tools: prefs.tools, thinking_level: thinkingLevel(), initData },
     });
     return data;
   }
@@ -450,7 +491,7 @@ import { appendReplyContent } from './videoReply.js';
       return;
     }
 
-    ws.send(JSON.stringify({ type: 'chat', prompt, model: prefs.model, tools: prefs.tools }));
+    ws.send(JSON.stringify({ type: 'chat', prompt, model: prefs.model, tools: prefs.tools, thinking_level: thinkingLevel() }));
   }
 
   form.addEventListener('submit', (e) => {

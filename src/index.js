@@ -3,17 +3,20 @@ import { bridgeSettings, pythonBin, ROOT } from './env.js';
 import { startServer } from './server.js';
 import { startBot } from './bot.js';
 import { healthCheck } from './geminiClient.js';
+import { stopLeftoverBridges } from './bridgeProcess.js';
 
 /** @type {import('child_process').ChildProcess | null} */
 let bridgeChild = null;
 let bridgeRestarting = false;
 
-function spawnBridge() {
+async function spawnBridge() {
   if (process.env.SKIP_BRIDGE === '1') {
     console.log('[index] SKIP_BRIDGE=1 — expecting external bridge');
     return null;
   }
   const { host, port, url } = bridgeSettings();
+  // An old uvicorn can ignore SIGTERM and keep the port. Kill it before bind.
+  await stopLeftoverBridges({ root: ROOT, port });
   const child = spawn(
     pythonBin(),
     ['-m', 'uvicorn', 'gemini_bridge:app', '--host', host, '--port', String(port)],
@@ -104,7 +107,7 @@ export async function restartBridge({ timeoutMs = 60000 } = {}) {
     }
     // Brief pause so the port can release
     await new Promise((r) => setTimeout(r, 400));
-    spawnBridge();
+    await spawnBridge();
     return await waitForBridge(timeoutMs);
   } finally {
     bridgeRestarting = false;
@@ -117,7 +120,7 @@ async function main() {
     process.exit(1);
   }
 
-  const bridge = startBridge();
+  const bridge = await startBridge();
   process.on('exit', () => {
     try {
       bridgeChild?.kill();

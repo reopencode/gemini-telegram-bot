@@ -72,6 +72,7 @@ Mini App: the admin sheet can allow/deny by `@username` or numeric user id. All 
 | `GEMINI_WEBAPI_CACHE` | no | Cache dir cleared on cookie refresh (default `/tmp/gemini_webapi`) |
 | `TUNNEL_HOST` | no | Host cloudflared forwards to (default `127.0.0.1`; port is `PORT`) |
 | `SKIP_BRIDGE` | no | Set `1` if you start the Python bridge yourself |
+| `GEMINI_DEEP_HEALTH_TIMEOUT` | no | Seconds for `GET /health/deep` quota probe (default `15`) |
 
 ## Setup
 
@@ -138,6 +139,8 @@ npm start
 See also `RUN.md` for the live tunnel URL used during bootstrap.
 
 In Telegram: `/start`, `/app`, or just type a message. `/new` resets the Gemini chat session. `/status` checks the bridge.
+
+`GET /health` only checks that the bridge process is up. After the host sleeps, its Google connections can be dead while `/health` stays green. `GET /health/deep` runs one cheap quota RPC (no chat, no prompt) with `GEMINI_DEEP_HEALTH_TIMEOUT`. The watchdog calls that every few minutes and, after two failures, restarts the bot and bridge. `UNAUTHENTICATED` still goes through cookie refresh, not this restart.
 
 ## Architecture
 

@@ -41,22 +41,22 @@ export async function getPrefs(sessionId = 'default') {
   return res.json();
 }
 
-export async function setPrefs(sessionId, { model, tools } = {}) {
+export async function setPrefs(sessionId, { model, tools, thinkingLevel } = {}) {
   const res = await fetch(`${bridgeUrl()}/prefs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, model, tools }),
+    body: JSON.stringify({ session_id: sessionId, model, tools, thinking_level: thinkingLevel }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || res.statusText);
   return data;
 }
 
-export async function chat(prompt, sessionId = 'default', { model, tools } = {}) {
+export async function chat(prompt, sessionId = 'default', { model, tools, thinkingLevel } = {}) {
   const res = await fetch(`${bridgeUrl()}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, session_id: sessionId, model, tools }),
+    body: JSON.stringify({ prompt, session_id: sessionId, model, tools, thinking_level: thinkingLevel }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -67,12 +67,13 @@ export async function chat(prompt, sessionId = 'default', { model, tools } = {})
   return data;
 }
 
-export async function chatWithFiles(prompt, sessionId, files, { model, tools } = {}) {
+export async function chatWithFiles(prompt, sessionId, files, { model, tools, thinkingLevel } = {}) {
   const form = new FormData();
   form.append('prompt', prompt || '');
   form.append('session_id', sessionId || 'default');
   if (model) form.append('model', model);
   if (tools != null) form.append('tools_json', JSON.stringify(tools));
+  if (thinkingLevel) form.append('thinking_level', thinkingLevel);
   for (const f of files || []) {
     // f: { buffer, filename, contentType }
     const blob = new Blob([f.buffer], { type: f.contentType || 'application/octet-stream' });
@@ -95,7 +96,7 @@ export async function chatWithFiles(prompt, sessionId, files, { model, tools } =
  * Throws an Error with `.fallback = true` when the Node side should call chat().
  * `.partial` is true when some text already arrived (do not resend the prompt).
  */
-export async function chatStream(prompt, sessionId = 'default', { model, tools, onPartial } = {}) {
+export async function chatStream(prompt, sessionId = 'default', { model, tools, thinkingLevel, onPartial } = {}) {
   let res;
   try {
     res = await fetch(`${bridgeUrl()}/chat_stream`, {
@@ -104,7 +105,7 @@ export async function chatStream(prompt, sessionId = 'default', { model, tools, 
         'Content-Type': 'application/json',
         Accept: 'application/x-ndjson',
       },
-      body: JSON.stringify({ prompt, session_id: sessionId, model, tools }),
+      body: JSON.stringify({ prompt, session_id: sessionId, model, tools, thinking_level: thinkingLevel }),
     });
   } catch (e) {
     const err = new Error(e.message || 'bridge stream failed');
@@ -195,6 +196,7 @@ export async function chatStream(prompt, sessionId = 'default', { model, tools, 
     session_id: finalEvent.session_id || sessionId,
     model: finalEvent.model ?? model ?? null,
     tools: finalEvent.tools || tools || null,
+    thinking_level: finalEvent.thinking_level ?? thinkingLevel ?? null,
     media: Array.isArray(finalEvent.media) ? finalEvent.media : [],
   };
   safeRecord(sessionId, prompt, out);

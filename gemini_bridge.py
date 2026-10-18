@@ -36,9 +36,11 @@ SUPPORTED_TOOLS = [
     {
         "id": "extended_thinking",
         "label": "Thinking",
-        "description": "Extended thinking / deeper reasoning (library flag).",
+        "description": "Extended thinking / deeper reasoning (library flag + level steering).",
         "supported": True,
         "kind": "flag",
+        "levels": ["low", "medium", "high"],
+        "default_level": "medium",
     },
     {
         "id": "deep_research",
@@ -91,8 +93,26 @@ SUPPORTED_TOOLS = [
     },
 ]
 
+THINKING_LEVELS = ["low", "medium", "high"]
+DEFAULT_THINKING_LEVEL = "medium"
+
+# gemini_webapi only has an on/off `extended_thinking` flag, so levels are
+# best-effort prompt steering. Medium is the plain flag (no prefix).
+THINKING_PROMPT_PREFIX = {
+    "low": "Reason briefly, then answer concisely.\n\n",
+    "medium": "",
+    "high": "Reason step by step and double-check your work before answering.\n\n",
+}
+
+
+def normalize_thinking_level(level: Any) -> str:
+    level = str(level or "").strip().lower()
+    return level if level in THINKING_LEVELS else DEFAULT_THINKING_LEVEL
+
+
 DEFAULT_PREFS = {
     "model": None,
+    "thinking_level": DEFAULT_THINKING_LEVEL,
     "tools": {
         "extended_thinking": False,
         "deep_research": False,
@@ -140,16 +160,25 @@ def get_session_prefs(session_id: str) -> dict:
     prefs = all_prefs.get(session_id) or {}
     merged = {
         "model": prefs.get("model", DEFAULT_PREFS["model"]),
+        "thinking_level": normalize_thinking_level(prefs.get("thinking_level")),
         "tools": {**DEFAULT_PREFS["tools"], **(prefs.get("tools") or {})},
     }
     return merged
 
 
-def set_session_prefs(session_id: str, *, model: str | None = None, tools: dict | None = None) -> dict:
+def set_session_prefs(
+    session_id: str,
+    *,
+    model: str | None = None,
+    tools: dict | None = None,
+    thinking_level: str | None = None,
+) -> dict:
     all_prefs = _load_prefs()
     cur = get_session_prefs(session_id)
     if model is not None:
         cur["model"] = model or None
+    if thinking_level is not None:
+        cur["thinking_level"] = normalize_thinking_level(thinking_level)
     if tools is not None:
         cur["tools"] = {**cur["tools"], **tools}
     all_prefs[session_id] = cur
@@ -230,12 +259,14 @@ class ChatRequest(BaseModel):
     session_id: str = Field(default="default", max_length=128)
     model: str | None = None
     tools: dict[str, bool] | None = None
+    thinking_level: str | None = None
 
 
 class PrefsRequest(BaseModel):
     session_id: str = Field(default="default", max_length=128)
     model: str | None = None
     tools: dict[str, bool] | None = None
+    thinking_level: str | None = None
 
 
 class MediaItem(BaseModel):
@@ -252,6 +283,7 @@ class ChatResponse(BaseModel):
     session_id: str
     model: str | None = None
     tools: dict[str, bool] | None = None
+    thinking_level: str | None = None
     media: list[MediaItem] = []
 
 
@@ -300,7 +332,12 @@ async def prefs_get(session_id: str = "default"):
 
 @app.post("/prefs")
 async def prefs_set(req: PrefsRequest):
-    prefs = set_session_prefs(req.session_id, model=req.model, tools=req.tools)
+    prefs = set_session_prefs(
+        req.session_id,
+        model=req.model,
+        tools=req.tools,
+        thinking_level=req.thinking_level,
+    )
     # Changing model mid-chat: reset chat so next message uses new model cleanly
     if req.model is not None:
         _chats.pop(req.session_id, None)
@@ -308,9 +345,19 @@ async def prefs_set(req: PrefsRequest):
 
 
 
-def _steer_prompt(prompt: str, tools: dict) -> str:
-    """Best-effort Android-like Create Image/Video/Music via prompt steering."""
+def _steer_prompt(prompt: str, tools: dict, thinking_level: str | None = None) -> str:
+    """Best-effort Android-like Create Image/Video/Music via prompt steering.
+
+    When extended thinking is on, the thinking level adds a reasoning prefix
+    (medium adds none).
+    """
     p = (prompt or "").strip()
+    if tools.get("extended_thinking") and not any(
+        tools.get(k) for k in ("create_image", "create_video", "create_music")
+    ):
+        prefix = THINKING_PROMPT_PREFIX.get(normalize_thinking_level(thinking_level), "")
+        if prefix and p:
+            return prefix + p
     # Priority if multiple media tools on: image > video > music
     for key in ("create_image", "create_video", "create_music"):
         if tools.get(key):
@@ -497,6 +544,7 @@ async def _prepare_turn(
     model: str | None,
     tools: dict[str, bool] | None,
     file_paths: list[Path] | None = None,
+    thinking_level: str | None = None,
 ) -> dict:
     """Shared session / prefs / model / tools setup for /chat and /chat_stream."""
     try:
@@ -509,6 +557,8 @@ async def _prepare_turn(
         prefs = set_session_prefs(session_id, model=model)
     if tools is not None:
         prefs = set_session_prefs(session_id, tools=tools)
+    if thinking_level is not None:
+        prefs = set_session_prefs(session_id, thinking_level=thinking_level)
 
     use_model = prefs.get("model") or None
     t = prefs.get("tools") or {}
@@ -531,7 +581,8 @@ async def _prepare_turn(
     if not prompt:
         prompt = "Please review the attached file(s) and respond helpfully."
 
-    prompt = _steer_prompt(prompt, t)
+    thinking_level_out = normalize_thinking_level(prefs.get("thinking_level"))
+    prompt = _steer_prompt(prompt, t, thinking_level_out)
 
     files_arg: list | None = None
     if file_paths:
@@ -567,6 +618,7 @@ async def _prepare_turn(
         "use_model": use_model,
         "session_id": session_id,
         "tools_out": tools_out,
+        "thinking_level": thinking_level_out,
     }
 
 
@@ -577,6 +629,7 @@ async def _run_chat(
     model: str | None,
     tools: dict[str, bool] | None,
     file_paths: list[Path] | None = None,
+    thinking_level: str | None = None,
 ) -> ChatResponse:
     try:
         prepared = await _prepare_turn(
@@ -585,6 +638,7 @@ async def _run_chat(
             model=model,
             tools=tools,
             file_paths=file_paths,
+            thinking_level=thinking_level,
         )
         result = await prepared["chat"].send_message(prepared["prompt"], **prepared["kwargs"])
         text = _clean_reply_text(getattr(result, "text", None) or str(result))
@@ -597,6 +651,7 @@ async def _run_chat(
             session_id=prepared["session_id"],
             model=prepared["use_model"],
             tools=prepared["tools_out"],
+            thinking_level=prepared["thinking_level"],
             media=media_items,
         )
     except HTTPException:
@@ -631,6 +686,7 @@ async def chat_stream(req: ChatRequest):
         model=req.model,
         tools=req.tools,
         file_paths=None,
+        thinking_level=req.thinking_level,
     )
 
     async def gen():
@@ -663,6 +719,7 @@ async def chat_stream(req: ChatRequest):
                     "session_id": prepared["session_id"],
                     "model": prepared["use_model"],
                     "tools": prepared["tools_out"],
+                    "thinking_level": prepared["thinking_level"],
                     "media": [m.model_dump() for m in media_items],
                 }
             )
@@ -694,6 +751,7 @@ async def chat(req: ChatRequest):
         model=req.model,
         tools=req.tools,
         file_paths=None,
+        thinking_level=req.thinking_level,
     )
 
 
@@ -703,6 +761,7 @@ async def chat_upload(
     session_id: str = Form("default"),
     model: str | None = Form(None),
     tools_json: str | None = Form(None),
+    thinking_level: str | None = Form(None),
     files: list[UploadFile] = File(default=[]),
 ):
     tools = None
@@ -756,6 +815,7 @@ async def chat_upload(
                 model=model,
                 tools=tools,
                 file_paths=None,
+                thinking_level=thinking_level,
             )
 
         if not account.get("authenticated") and binaryish:
@@ -779,6 +839,7 @@ async def chat_upload(
             model=model,
             tools=tools,
             file_paths=saved,
+            thinking_level=thinking_level,
         )
     except HTTPException:
         for p in saved:

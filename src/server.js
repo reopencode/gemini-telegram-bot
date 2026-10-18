@@ -97,7 +97,11 @@ export function createApp() {
   app.post('/api/prefs', requireMiniAppAuth, async (req, res) => {
     try {
       const sessionId = req.tgSessionId;
-      res.json(await setPrefs(sessionId, { model: req.body?.model, tools: req.body?.tools }));
+      res.json(await setPrefs(sessionId, {
+        model: req.body?.model,
+        tools: req.body?.tools,
+        thinkingLevel: req.body?.thinking_level,
+      }));
     } catch (e) {
       res.status(502).json({ error: String(e.message || e) });
     }
@@ -111,6 +115,7 @@ export function createApp() {
       const result = await chat(prompt, sessionId, {
         model: req.body?.model,
         tools: req.body?.tools,
+        thinkingLevel: req.body?.thinking_level,
       });
       res.json(result);
     } catch (e) {
@@ -141,6 +146,7 @@ export function createApp() {
       const result = await chatWithFiles(prompt, sessionId, files, {
         model: req.body?.model || undefined,
         tools,
+        thinkingLevel: req.body?.thinking_level || undefined,
       });
       res.json(result);
     } catch (e) {
@@ -276,7 +282,11 @@ export function startServer() {
       }
       if (msg.type === 'prefs') {
         try {
-          const data = await setPrefs(sessionId, { model: msg.model, tools: msg.tools });
+          const data = await setPrefs(sessionId, {
+            model: msg.model,
+            tools: msg.tools,
+            thinkingLevel: msg.thinking_level,
+          });
           ws.send(JSON.stringify({ type: 'prefs_ok', ...data }));
         } catch (e) {
           ws.send(JSON.stringify({ type: 'error', error: String(e.message || e) }));
@@ -291,13 +301,18 @@ export function startServer() {
         }
         ws.send(JSON.stringify({ type: 'status', status: 'thinking' }));
         try {
-          const result = await chat(prompt, sessionId, { model: msg.model, tools: msg.tools });
+          const result = await chat(prompt, sessionId, {
+            model: msg.model,
+            tools: msg.tools,
+            thinkingLevel: msg.thinking_level,
+          });
           ws.send(
             JSON.stringify({
               type: 'reply',
               text: result.text,
               session_id: result.session_id,
               model: result.model,
+              thinking_level: result.thinking_level,
               media: result.media || [],
             }),
           );

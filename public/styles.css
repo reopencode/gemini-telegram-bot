@@ -202,6 +202,18 @@ textarea {
   transition: left .15s;
 }
 .toggle.on::after { left: 21px; }
+.level-row {
+  padding: 8px 0 12px; border-bottom: 1px solid var(--border);
+}
+.segmented {
+  display: flex; margin-top: 6px; border: 1px solid var(--border); border-radius: 999px; overflow: hidden;
+}
+.seg {
+  flex: 1; padding: 8px 0; background: transparent; border: 0; color: var(--text);
+  font: inherit; font-size: 13px; cursor: pointer;
+}
+.seg + .seg { border-left: 1px solid var(--border); }
+.seg.on { background: #8ab4f8; color: #1b1f24; font-weight: 600; }
 .stub-badge {
   display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 999px;
   border: 1px solid var(--border); color: var(--muted); margin-left: 6px;

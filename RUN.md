@@ -11,6 +11,8 @@
 
 Keeps **cloudflared** (`PORT`, default 8787) + **`npm start`** (node bot + uvicorn bridge) alive, syncs `WEBAPP_URL` when the quick-tunnel URL changes, and on bridge `UNAUTHENTICATED` best-effort refreshes cookies via `scripts/export_live_cookies.mjs` then restarts the bot. The watchdog loads `.env` the same way as `npm start` (existing environment variables win).
 
+Every few minutes (`DEEP_HEALTH_EVERY_S`, default 180) it also calls `GET /health/deep` (curl timeout `DEEP_HEALTH_CURL_TIMEOUT`, default 20s). That probe is one quota RPC with a short timeout (`GEMINI_DEEP_HEALTH_TIMEOUT`, default 15s). Two consecutive failures or timeouts (`DEEP_FAILS_BEFORE_RESTART`, default 2) restart node and uvicorn: SIGTERM, then SIGKILL after `STOP_GRACE_S` (default 4s) if a process is still alive, then the usual start path brings both back. Restarts are limited to one per `STALE_RESTART_COOLDOWN_S` (default 300s). A deep-check result of `UNAUTHENTICATED` is not a failure; cookie refresh handles expired cookies. Before each start, leftover `uvicorn gemini_bridge` processes for this tree are killed so a bridge that ignored SIGTERM cannot keep port `GEMINI_BRIDGE_PORT`.
+
 Logs: `/tmp/gemini-bot-watchdog.log`  
 Bot logs: `/tmp/gemini-telegram-bot.log`  
 Tunnel log: `/tmp/cloudflared-out.log`  
@@ -47,6 +49,7 @@ pkill -f '/workspace/gemini-telegram-bot.*watchdog' 2>/dev/null
 
 ```bash
 curl -sS "${GEMINI_BRIDGE_URL:-http://127.0.0.1:8765}/health"
+curl -sS -m "${DEEP_HEALTH_CURL_TIMEOUT:-20}" "${GEMINI_BRIDGE_URL:-http://127.0.0.1:8765}/health/deep"
 pgrep -af 'cloudflared tunnel --url|node src/index.js|watchdog|supervise-watchdog'
 cat /tmp/gemini-bot-tunnel.url
 tail -40 /tmp/gemini-bot-watchdog.log

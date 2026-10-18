@@ -4,6 +4,7 @@ Personal / research use only — fragile and may violate Google ToS.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import mimetypes
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from gemini_webapi import GeminiClient
 from gemini_webapi.constants import AccountStatus
@@ -139,6 +140,7 @@ MEDIA_PROMPT_PREFIX = {
 
 app = FastAPI(title="Gemini Web Bridge", version="0.2.0")
 _client: Optional[GeminiClient] = None
+_client_lock = asyncio.Lock()
 _chats: dict[str, Any] = {}
 
 
@@ -203,11 +205,14 @@ async def get_client() -> GeminiClient:
     global _client
     if _client is not None:
         return _client
-    psid, psidts = _load_cookies()
-    client = GeminiClient(psid, psidts or None)
-    await client.init(timeout=60, auto_refresh=True, auto_close=False)
-    _client = client
-    return client
+    async with _client_lock:
+        if _client is not None:
+            return _client
+        psid, psidts = _load_cookies()
+        client = GeminiClient(psid, psidts or None)
+        await client.init(timeout=60, auto_refresh=True, auto_close=False)
+        _client = client
+        return client
 
 
 def _serialize_models(client: GeminiClient) -> list[dict]:
@@ -309,6 +314,127 @@ async def health():
         "startup_error": getattr(app.state, "startup_error", None),
         "account": info,
     }
+
+
+def _deep_health_timeout() -> float:
+    """Short bound for the quota probe. Invalid or non-positive values fall back to 15s."""
+    raw = os.environ.get("GEMINI_DEEP_HEALTH_TIMEOUT", "15")
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        return 15.0
+    return timeout if timeout > 0 else 15.0
+
+
+def _account_status_name(client) -> str:
+    if client is None:
+        return ""
+    try:
+        return str(_account_info(client).get("status") or "")
+    except Exception:
+        return ""
+
+
+def _failure_is_unauthenticated(exc: BaseException, client) -> bool:
+    """Expired cookies are not a stale-connection failure. Timeouts are."""
+    if isinstance(exc, TimeoutError):
+        return False
+    if "timeout" in type(exc).__name__.lower():
+        return False
+    if _account_status_name(client) == AccountStatus.UNAUTHENTICATED.name:
+        return True
+    if "auth" in type(exc).__name__.lower():
+        return True
+    text = str(exc).lower()
+    return "unauthenticated" in text or "permission denied" in text
+
+
+def _safe_account(client) -> dict | None:
+    """Status only. Never include cookie values or exception text."""
+    if client is None:
+        return None
+    try:
+        info = _account_info(client)
+    except Exception:
+        return None
+    return {
+        "status": info.get("status"),
+        "authenticated": bool(info.get("authenticated")),
+    }
+
+
+async def probe_google_quota(client, timeout: float) -> None:
+    """One cheap quota RPC through the existing client.
+
+    Uses the same CHECK_QUOTA call as gemini_webapi's extra-quota fetch.
+    Does not start a chat or send a prompt. `timeout` is per-request so a
+    dead connection fails without lowering the timeout of in-flight chats.
+    """
+    batch = getattr(client, "_batch_execute", None)
+    if batch is not None:
+        from gemini_webapi.constants import GRPC
+        from gemini_webapi.types import RPCData
+
+        rpc_id = GRPC.CHECK_QUOTA
+        response = await batch([RPCData(rpcid=rpc_id, payload="[]")], timeout=timeout)
+        parser = getattr(client, "_parse_rpc_results", None)
+        text = getattr(response, "text", "") if response is not None else ""
+        if parser is not None and text:
+            for _part in parser(text, rpc_id):
+                pass
+        return
+
+    extra = getattr(client, "_fetch_extra_quota", None)
+    if extra is not None:
+        await extra()
+        return
+    activity = getattr(client, "_sync_activity", None)
+    if activity is not None:
+        await activity()
+        return
+    quota = getattr(client, "_fetch_quota", None)
+    if quota is not None:
+        await quota()
+        return
+    raise RuntimeError("gemini client has no quota probe")
+
+
+def _deep_health_body(ok: bool, reason: str, client=None, stale: bool | None = None) -> dict:
+    body: dict[str, Any] = {"ok": ok, "reason": reason}
+    if stale is not None:
+        body["stale"] = stale
+    account = _safe_account(client)
+    if account is not None:
+        body["account"] = account
+    return body
+
+
+@app.get("/health/deep")
+async def health_deep():
+    """Real Google round-trip. Shallow /health stays local and can stay green on a dead socket."""
+    timeout = _deep_health_timeout()
+    client: GeminiClient | None = None
+
+    async def run():
+        nonlocal client
+        client = await get_client()
+        await probe_google_quota(client, timeout)
+
+    try:
+        await asyncio.wait_for(run(), timeout)
+    except TimeoutError:
+        print("[bridge] deep health timed out")
+        return JSONResponse(status_code=503, content=_deep_health_body(False, "timeout"))
+    except Exception as e:
+        if _failure_is_unauthenticated(e, client):
+            return _deep_health_body(True, "unauthenticated", client, stale=False)
+        # Type name only — exception text can echo request headers, including cookies.
+        print(f"[bridge] deep health probe failed: {type(e).__name__}")
+        return JSONResponse(status_code=503, content=_deep_health_body(False, "probe_failed"))
+
+    if _account_status_name(client) == AccountStatus.UNAUTHENTICATED.name:
+        return _deep_health_body(True, "unauthenticated", client, stale=False)
+    return _deep_health_body(True, "ok", client, stale=False)
 
 
 @app.get("/models")

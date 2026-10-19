@@ -47,10 +47,6 @@ import { appendReplyContent } from './videoReply.js';
     return level.charAt(0).toUpperCase() + level.slice(1);
   }
 
-  function toolLabelFor(id, fallback) {
-    const base = fallback || id;
-    return id === 'extended_thinking' ? `${base} · ${levelLabel(thinkingLevel())}` : base;
-  }
   let pendingFiles = [];
   let isAdminUser = false;
   let authed = false;
@@ -121,9 +117,10 @@ import { appendReplyContent } from './videoReply.js';
 
   function modelLabel() {
     const id = prefs.model;
-    if (!id) return 'Model';
+    if (!id) return `Model · ${levelLabel(thinkingLevel())}`;
     const m = models.find((x) => x.id === id);
-    return (m?.display_name || id).replace(/^Gemini\s*/i, '') || id;
+    const name = (m?.display_name || id).replace(/^Gemini\s*/i, '') || id;
+    return `${name} · ${levelLabel(thinkingLevel())}`;
   }
 
   function refreshChrome() {
@@ -134,19 +131,14 @@ import { appendReplyContent } from './videoReply.js';
   }
 
   const TOOL_LABELS = {
-    extended_thinking: 'Thinking',
-    deep_research: 'Deep Research',
     create_image: 'Create Image',
     create_video: 'Create Video',
     create_music: 'Create Music',
-    google_search: 'Search',
-    code_execution: 'Code',
-    canvas: 'Canvas',
   };
 
   function activeToolIds() {
     const t = prefs.tools || {};
-    return Object.keys(t).filter((id) => !!t[id]);
+    return Object.keys(t).filter((id) => !!t[id] && TOOL_LABELS[id]);
   }
 
   function renderToolChips() {
@@ -165,7 +157,7 @@ import { appendReplyContent } from './videoReply.js';
       btn.type = 'button';
       btn.className = 'tool-chip ' + ((meta && meta.kind) || (id.startsWith('create_') ? 'media' : 'flag'));
       btn.title = 'Tap to turn off';
-      btn.innerHTML = `<span>${toolLabelFor(id, TOOL_LABELS[id] || meta?.label)}</span><span class="x" aria-hidden="true">×</span>`;
+      btn.innerHTML = `<span>${TOOL_LABELS[id] || meta?.label || id}</span><span class="x" aria-hidden="true">×</span>`;
       btn.addEventListener('click', async () => {
         const next = { ...(prefs.tools || {}) };
         next[id] = false;
@@ -174,7 +166,7 @@ import { appendReplyContent } from './videoReply.js';
       toolChips.appendChild(btn);
     }
     // Also mirror in status subtitle
-    const labels = active.map((id) => toolLabelFor(id, TOOL_LABELS[id]));
+    const labels = active.map((id) => TOOL_LABELS[id] || id);
     statusEl.textContent = (statusEl.dataset.base || 'Online') + ' · ' + labels.join(' · ');
   }
 
@@ -336,6 +328,7 @@ import { appendReplyContent } from './videoReply.js';
       });
       root.appendChild(btn);
     };
+    root.appendChild(renderThinkingLevels());
     mk('Account default', 'Let Gemini choose', '', !prefs.model);
     for (const m of models) {
       const avail = m.available ? 'Available' : 'May be limited';
@@ -363,7 +356,6 @@ import { appendReplyContent } from './videoReply.js';
         renderToolsSheet(sheetBody);
       });
       root.appendChild(row);
-      if (tool.id === 'extended_thinking' && on) root.appendChild(renderThinkingLevels());
     }
   }
 
@@ -373,7 +365,7 @@ import { appendReplyContent } from './videoReply.js';
     const cur = thinkingLevel();
     const lbl = document.createElement('div');
     lbl.className = 'desc';
-    lbl.textContent = 'Thinking level';
+    lbl.textContent = 'Thinking level · Low is fastest, High reasons deepest';
     const seg = document.createElement('div');
     seg.className = 'segmented';
     for (const l of THINKING_LEVELS) {
@@ -384,7 +376,7 @@ import { appendReplyContent } from './videoReply.js';
       b.addEventListener('click', async () => {
         await savePrefs({ thinking_level: l });
         sheetBody.innerHTML = '';
-        renderToolsSheet(sheetBody);
+        renderModelSheet(sheetBody);
       });
       seg.appendChild(b);
     }

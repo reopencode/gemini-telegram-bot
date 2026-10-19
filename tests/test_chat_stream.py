@@ -135,7 +135,7 @@ class ChatStreamEndpointTests(unittest.TestCase):
                     "prompt": "draw something",
                     "session_id": "tg-1",
                     "model": "gemini-flash",
-                    "tools": {"extended_thinking": True, "create_image": True},
+                    "tools": {"create_image": True},
                 },
             )
 
@@ -148,14 +148,15 @@ class ChatStreamEndpointTests(unittest.TestCase):
         self.assertEqual(final["text"], "Hello")
         self.assertEqual(final["session_id"], "tg-1")
         self.assertEqual(final["model"], "gemini-flash")
-        self.assertTrue(final["tools"]["extended_thinking"])
+        self.assertNotIn("extended_thinking", final["tools"])
         self.assertTrue(final["tools"]["create_image"])
+        self.assertEqual(final["thinking_level"], "medium")
         self.assertEqual(final["media"][0]["type"], "image")
         self.assertEqual(final["media"][0]["filename"], "a.png")
         prompt, kwargs = chat.stream_calls[0]
         self.assertTrue(prompt.startswith("GENERATE an image"))
         self.assertEqual(kwargs["extended_thinking"], True)
-        self.assertEqual(kwargs["deep_research"], False)
+        self.assertNotIn("deep_research", kwargs)
         self.assertEqual(kwargs["temporary"], False)
         self.assertNotIn("files", kwargs)
 
@@ -210,7 +211,7 @@ class ChatStreamEndpointTests(unittest.TestCase):
             "prompt": "hello",
             "session_id": "shared",
             "model": "gemini-flash",
-            "tools": {"extended_thinking": True, "deep_research": True},
+            "tools": {"create_music": True},
         }
         with patch.object(gemini_bridge, "get_client", get_client):
             streamed = self.http.post("/chat_stream", json=body)
@@ -222,7 +223,7 @@ class ChatStreamEndpointTests(unittest.TestCase):
         self.assertEqual(once.status_code, 200, once.text)
         self.assertEqual(once.json()["text"], "one shot")
         self.assertEqual(once.json()["model"], "gemini-flash")
-        self.assertTrue(once.json()["tools"]["deep_research"])
+        self.assertTrue(once.json()["tools"]["create_music"])
         self.assertEqual(len(chat.stream_calls), 1)
         self.assertEqual(len(chat.send_calls), 1)
         self.assertEqual(chat.stream_calls[0][0], chat.send_calls[0][0])

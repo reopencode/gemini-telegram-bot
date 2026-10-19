@@ -43,18 +43,14 @@ function sid(ctx) {
 }
 
 const TOOL_LABELS = {
-  extended_thinking: 'Thinking',
-  deep_research: 'Deep Research',
   create_image: 'Create Image',
   create_video: 'Create Video',
   create_music: 'Create Music',
-  google_search: 'Search',
-  code_execution: 'Code',
-  canvas: 'Canvas',
 };
 
 const GEMINI_ERROR_MESSAGE = 'Gemini didn’t answer — try again in a bit.';
 const THINKING_INTRO = 'Thinking level — Low is quick, Medium is balanced, High reasons deepest.';
+const MODEL_INTRO = `Pick a model for this chat — Flash or Pro.\n${THINKING_INTRO}`;
 const TOOLS_INTRO = 'Tools — Tap to turn on or off. Active ones stay on until you tap them again.';
 
 export const THINKING_LEVELS = ['low', 'medium', 'high'];
@@ -70,20 +66,37 @@ function levelLabel(level) {
   return v.charAt(0).toUpperCase() + v.slice(1);
 }
 
-/** Display label for a tool; Thinking shows its level when one is known. */
-export function toolLabel(id, level) {
-  const base = TOOL_LABELS[id] || id;
-  return id === 'extended_thinking' && level ? `${base} · ${levelLabel(level)}` : base;
+/** Models and the tool catalog rarely change; skip a bridge round trip on every tap. */
+const LOOKUP_TTL_MS = 60_000;
+function cachedLookup(load) {
+  let value = null;
+  let at = 0;
+  return async () => {
+    if (value && Date.now() - at < LOOKUP_TTL_MS) return value;
+    value = await load();
+    at = Date.now();
+    return value;
+  };
+}
+const cachedModels = cachedLookup(() => listModels());
+const cachedTools = cachedLookup(() => listTools());
+
+export function toolLabel(id) {
+  return TOOL_LABELS[id] || id;
 }
 
-export function formatActiveTools(tools = {}, level) {
-  const on = Object.entries(tools)
-    .filter(([, v]) => !!v)
-    .map(([k]) => toolLabel(k, level));
+function activeToolIds(tools = {}) {
+  return Object.entries(tools || {})
+    .filter(([id, on]) => !!on && TOOL_LABELS[id])
+    .map(([id]) => id);
+}
+
+export function formatActiveTools(tools = {}) {
+  const on = activeToolIds(tools).map(toolLabel);
   return on.length ? on.join(', ') : '(none)';
 }
 
-/** Low / Medium / High row for the Thinking level (callback `think:<level>`). */
+/** Low / Medium / High row for the thinking level (callback `think:<level>`). */
 export function addThinkingRow(kb, level) {
   const cur = normalizeThinkingLevel(level);
   for (const l of THINKING_LEVELS) {
@@ -93,21 +106,47 @@ export function addThinkingRow(kb, level) {
   return kb;
 }
 
-/** Tools picker; the level row sits right under Thinking while it is on. */
-export function buildToolsKb(catalog = [], tools = {}, level) {
+/** Tools picker: Create Image / Video / Music only. */
+export function buildToolsKb(catalog = [], tools = {}) {
   const kb = new InlineKeyboard();
   for (const tool of catalog) {
-    const on = !!tools[tool.id];
-    const stub = tool.supported ? '' : ' · stub';
-    kb.text(`${on ? '✓' : '○'} ${tool.label}${stub}`, `tool:${tool.id}`).row();
-    if (tool.id === 'extended_thinking' && on) addThinkingRow(kb, level);
+    if (!TOOL_LABELS[tool.id]) continue;
+    kb.text(`${tools[tool.id] ? '✓' : '○'} ${tool.label}`, `tool:${tool.id}`).row();
   }
   return kb;
 }
 
-async function currentThinkingLevel(session) {
-  const prefs = await getPrefs(session);
-  return normalizeThinkingLevel(prefs.prefs?.thinking_level);
+/** Model picker; the thinking level row sits under the models. */
+export function buildModelKb(models = [], current, level) {
+  const kb = new InlineKeyboard();
+  kb.text(current ? 'Default' : '✓ Default', 'model:').row();
+  for (const m of models) {
+    const mark = current === m.id ? '✓ ' : '';
+    const avail = m.available ? '' : ' (limited)';
+    kb.text(`${mark}${m.display_name || m.id}${avail}`, `model:${m.id}`).row();
+  }
+  return addThinkingRow(kb, level);
+}
+
+async function modelView(session) {
+  const { models } = await cachedModels();
+  const prefs = (await getPrefs(session)).prefs || {};
+  const level = normalizeThinkingLevel(prefs.thinking_level);
+  return {
+    text: `${MODEL_INTRO}\nThinking: ${levelLabel(level)}`,
+    reply_markup: buildModelKb(models || [], prefs.model, level),
+  };
+}
+
+async function toolsView(session) {
+  const { tools: catalog } = await cachedTools();
+  const prefs = (await getPrefs(session)).prefs || {};
+  const tools = prefs.tools || {};
+  return {
+    tools,
+    text: `${TOOLS_INTRO}\nActive now: ${formatActiveTools(tools)}`,
+    reply_markup: buildToolsKb(catalog, tools),
+  };
 }
 
 async function sessionOptions(ctx) {
@@ -121,13 +160,13 @@ async function sessionOptions(ctx) {
 }
 
 /** Active-only sticky chips (tap → turn that tool off). */
-export function buildActiveChipsKb(tools = {}, level) {
-  const active = Object.entries(tools || {}).filter(([, v]) => !!v);
+export function buildActiveChipsKb(tools = {}) {
+  const active = activeToolIds(tools);
   if (!active.length) return null;
   const kb = new InlineKeyboard();
   let n = 0;
-  for (const [id] of active) {
-    const label = toolLabel(id, level);
+  for (const id of active) {
+    const label = toolLabel(id);
     kb.text(`✓ ${label} ×`, `chip:${id}`);
     n += 1;
     if (n % 2 === 0) kb.row();
@@ -135,8 +174,8 @@ export function buildActiveChipsKb(tools = {}, level) {
   return kb;
 }
 
-function replyMarkupForTools(tools, level) {
-  const kb = buildActiveChipsKb(tools, level);
+function replyMarkupForTools(tools) {
+  const kb = buildActiveChipsKb(tools);
   return kb ? { reply_markup: kb } : {};
 }
 
@@ -147,13 +186,12 @@ function chipsKey(ctx) {
   return `${ctx.chat?.id}:${sid(ctx)}`;
 }
 
-async function upsertActiveChipsMessage(ctx, tools, level) {
-  if (level === undefined) level = await currentThinkingLevel(sid(ctx)).catch(() => undefined);
-  const kb = buildActiveChipsKb(tools, level);
+async function upsertActiveChipsMessage(ctx, tools) {
+  const kb = buildActiveChipsKb(tools);
   const key = chipsKey(ctx);
   const prevId = chipsMessageIds.get(key);
   const text = kb
-    ? `Active tools\n${formatActiveTools(tools, level)}`
+    ? `Active tools\n${formatActiveTools(tools)}`
     : 'No tools are on right now.';
   if (prevId) {
     try {
@@ -211,7 +249,7 @@ async function deliverMedia(ctx, result, tools, { textAlreadySent = false } = {}
   const hadVideo = (result?.media || []).some((m) => m.type === 'video');
   result = withoutVideos(result);
   const activeTools = tools || result?.tools || {};
-  const chipOpts = replyMarkupForTools(activeTools, result?.thinking_level);
+  const chipOpts = replyMarkupForTools(activeTools);
   const media = result?.media || [];
   if (hadVideo && !textAlreadySent && !media.length) {
     await ctx.reply(VIDEO_READY_TEXT, chipOpts);
@@ -448,7 +486,7 @@ function createLiveReply(ctx, seedMsg) {
 async function presentChatResult(ctx, result, tools, live) {
   result = withoutVideos(result);
   const media = result?.media || [];
-  const chipKb = buildActiveChipsKb(tools || result?.tools || {}, result?.thinking_level);
+  const chipKb = buildActiveChipsKb(tools || result?.tools || {});
   const raw = result?.text || '';
   const finalText = raw.trim() ? raw : media.length ? '' : '(empty reply)';
   if (live) {
@@ -458,7 +496,7 @@ async function presentChatResult(ctx, result, tools, live) {
       await live.discard();
     }
   } else if (!media.length) {
-    await ctx.reply((raw || '(empty reply)').slice(0, 4000), replyMarkupForTools(tools, result?.thinking_level));
+    await ctx.reply((raw || '(empty reply)').slice(0, 4000), replyMarkupForTools(tools));
   }
   if (media.length) {
     await deliverMedia(ctx, result, tools, { textAlreadySent: !!(live && finalText) });
@@ -655,12 +693,11 @@ export function createBot(options = {}) {
       'Or open the app for the full Gemini-style UI.',
       '',
       'Quick actions:',
-      '• /model — pick Flash / Pro',
-      '• /tools — Thinking, Image, Video, Music…',
+      '• /model — pick Flash / Pro and the thinking level',
+      '• /tools — Create Image, Video, Music',
       '• /new — start a fresh chat (the old one is saved)',
       '• /history — read your past chats (read-only)',
       '• /thinking — set the thinking level (low / medium / high)',
-      '• /new — start a fresh chat',
       '• /status — what’s on right now',
       '• /fix — diagnose if the bot isn’t answering',
     ];
@@ -792,8 +829,8 @@ export function createBot(options = {}) {
           '',
           `Gemini: ${h.ok ? 'connected' : 'not connected'}`,
           `Account: ${acct.status || 'unknown'}${acct.authenticated ? ' · signed in' : ''}`,
-          `Model: ${prefs.prefs?.model || 'account default'}`,
-          `Tools: ${formatActiveTools(prefs.prefs?.tools || {}, prefs.prefs?.thinking_level)}`,
+          `Model: ${prefs.prefs?.model || 'account default'} · Thinking: ${levelLabel(prefs.prefs?.thinking_level)}`,
+          `Tools: ${formatActiveTools(prefs.prefs?.tools || {})}`,
           `Mini App: ${webAppUrl() ? 'ready' : 'not configured'}`,
           `Allowlist: ${auth.usernames.length ? auth.usernames.join(', ') : 'empty'}`,
         ].join('\n'),
@@ -809,17 +846,8 @@ export function createBot(options = {}) {
 
   bot.command('model', async (ctx) => {
     try {
-      const { models } = await listModels();
-      const prefs = await getPrefs(sid(ctx));
-      const current = prefs.prefs?.model;
-      const kb = new InlineKeyboard();
-      kb.text(current ? `Default` : `✓ Default`, 'model:').row();
-      for (const m of models || []) {
-        const mark = current === m.id ? '✓ ' : '';
-        const avail = m.available ? '' : ' (limited)';
-        kb.text(`${mark}${m.display_name || m.id}${avail}`, `model:${m.id}`).row();
-      }
-      await ctx.reply('Pick a model for this chat — Flash or Pro:', { reply_markup: kb });
+      const { text, reply_markup } = await modelView(sid(ctx));
+      await ctx.reply(text, { reply_markup });
     } catch (e) {
       await ctx.reply('I couldn’t load the models right now — try again in a bit.');
     }
@@ -827,16 +855,9 @@ export function createBot(options = {}) {
 
   bot.command('tools', async (ctx) => {
     try {
-      const { tools } = await listTools();
-      const prefs = await getPrefs(sid(ctx));
-      const t = prefs.prefs?.tools || {};
-      const level = normalizeThinkingLevel(prefs.prefs?.thinking_level);
-      const kb = buildToolsKb(tools, t, level);
-      await ctx.reply(
-        `${TOOLS_INTRO}\nActive now: ${formatActiveTools(t, level)}`,
-        { reply_markup: kb },
-      );
-      await upsertActiveChipsMessage(ctx, t, level);
+      const { tools, text, reply_markup } = await toolsView(sid(ctx));
+      await ctx.reply(text, { reply_markup });
+      await upsertActiveChipsMessage(ctx, tools);
     } catch (e) {
       await ctx.reply('I couldn’t load the tools right now — try again in a bit.');
     }
@@ -845,13 +866,10 @@ export function createBot(options = {}) {
   bot.command('thinking', async (ctx) => {
     try {
       const prefs = await getPrefs(sid(ctx));
-      const on = !!prefs.prefs?.tools?.extended_thinking;
       const level = normalizeThinkingLevel(prefs.prefs?.thinking_level);
-      const kb = addThinkingRow(new InlineKeyboard(), level);
-      await ctx.reply(
-        `${THINKING_INTRO}\nThinking is ${on ? 'on' : 'off'} · level: ${levelLabel(level)}${on ? '' : ' (turn Thinking on in /tools to use it)'}`,
-        { reply_markup: kb },
-      );
+      await ctx.reply(`${THINKING_INTRO}\nLevel: ${levelLabel(level)}`, {
+        reply_markup: addThinkingRow(new InlineKeyboard(), level),
+      });
     } catch (e) {
       await ctx.reply('I couldn’t load your settings right now — try again in a bit.');
     }
@@ -895,10 +913,9 @@ export function createBot(options = {}) {
         const tools = { ...(prefs.prefs?.tools || {}) };
         tools[id] = false;
         await setPrefs(session, { tools });
-        const level = normalizeThinkingLevel(prefs.prefs?.thinking_level);
         const label = TOOL_LABELS[id] || id;
         await ctx.answerCallbackQuery({ text: `${label}: off` });
-        const kb = buildActiveChipsKb(tools, level);
+        const kb = buildActiveChipsKb(tools);
         const msgId = ctx.callbackQuery.message?.message_id;
         const key = chipsKey(ctx);
         const isSticky = chipsMessageIds.get(key) === msgId;
@@ -913,55 +930,50 @@ export function createBot(options = {}) {
         } catch (e) {
           console.warn('[bot] chip markup refresh failed', e.message || e);
         }
-        await upsertActiveChipsMessage(ctx, tools, level);
+        await upsertActiveChipsMessage(ctx, tools);
         return;
       }
       if (data.startsWith('think:')) {
         const level = normalizeThinkingLevel(data.slice('think:'.length));
         await setPrefs(session, { thinkingLevel: level });
         await ctx.answerCallbackQuery({ text: `Thinking: ${levelLabel(level)}` });
-        const prefs = await getPrefs(session);
-        const tools = prefs.prefs?.tools || {};
         const msgText = ctx.callbackQuery.message?.text || '';
         try {
           if (msgText.startsWith('Thinking level')) {
-            await ctx.editMessageText(
-              `${THINKING_INTRO}\nThinking is ${tools.extended_thinking ? 'on' : 'off'} · level: ${levelLabel(level)}${tools.extended_thinking ? '' : ' (turn Thinking on in /tools to use it)'}`,
-              { reply_markup: addThinkingRow(new InlineKeyboard(), level) },
-            );
+            await ctx.editMessageText(`${THINKING_INTRO}\nLevel: ${levelLabel(level)}`, {
+              reply_markup: addThinkingRow(new InlineKeyboard(), level),
+            });
           } else {
-            const { tools: catalog } = await listTools();
-            await ctx.editMessageText(
-              `${TOOLS_INTRO}\nActive now: ${formatActiveTools(tools, level)}`,
-              { reply_markup: buildToolsKb(catalog, tools, level) },
-            );
+            const view = await modelView(session);
+            await ctx.editMessageText(view.text, { reply_markup: view.reply_markup });
           }
         } catch (e) {
-          console.warn('[bot] thinking level refresh failed', e.message || e);
+          if (!isNotModified(e)) console.warn('[bot] thinking level refresh failed', e.message || e);
         }
-        await upsertActiveChipsMessage(ctx, tools, level);
         return;
       }
       if (data.startsWith('tool:')) {
         const id = data.slice('tool:'.length);
+        if (!TOOL_LABELS[id]) {
+          await ctx.answerCallbackQuery({ text: 'Unknown tool' });
+          return;
+        }
         const prefs = await getPrefs(session);
         const tools = { ...(prefs.prefs?.tools || {}) };
         tools[id] = !tools[id];
         await setPrefs(session, { tools });
-        const { tools: catalog } = await listTools();
-        const level = normalizeThinkingLevel(prefs.prefs?.thinking_level);
-        const kb = buildToolsKb(catalog, tools, level);
-        const active = formatActiveTools(tools, level);
-        await ctx.answerCallbackQuery({ text: `${id}: ${tools[id] ? 'on' : 'off'}` });
+        const { tools: catalog } = await cachedTools();
+        const kb = buildToolsKb(catalog, tools);
+        await ctx.answerCallbackQuery({ text: `${TOOL_LABELS[id]}: ${tools[id] ? 'on' : 'off'}` });
         try {
           await ctx.editMessageText(
-            `${TOOLS_INTRO}\nActive now: ${active}`,
+            `${TOOLS_INTRO}\nActive now: ${formatActiveTools(tools)}`,
             { reply_markup: kb },
           );
         } catch {
           await ctx.editMessageReplyMarkup({ reply_markup: kb });
         }
-        await upsertActiveChipsMessage(ctx, tools, level);
+        await upsertActiveChipsMessage(ctx, tools);
         return;
       }
       if (data === 'fix:cookies') {
@@ -1103,17 +1115,8 @@ export function createBot(options = {}) {
   // Reply-keyboard actions. Register before the generic text-chat handler.
   bot.hears('Model', async (ctx) => {
     try {
-      const { models } = await listModels();
-      const prefs = await getPrefs(sid(ctx));
-      const current = prefs.prefs?.model;
-      const kb = new InlineKeyboard();
-      kb.text(current ? 'Default' : '✓ Default', 'model:').row();
-      for (const m of models || []) {
-        const mark = current === m.id ? '✓ ' : '';
-        const avail = m.available ? '' : ' (limited)';
-        kb.text(`${mark}${m.display_name || m.id}${avail}`, `model:${m.id}`).row();
-      }
-      await ctx.reply('Pick a model for this chat — Flash or Pro:', { reply_markup: kb });
+      const { text, reply_markup } = await modelView(sid(ctx));
+      await ctx.reply(text, { reply_markup });
     } catch {
       await replyWithMenu(ctx, 'I couldn’t load the models right now — try again in a bit.');
     }
@@ -1121,13 +1124,9 @@ export function createBot(options = {}) {
 
   bot.hears('Tools', async (ctx) => {
     try {
-      const { tools } = await listTools();
-      const prefs = await getPrefs(sid(ctx));
-      const t = prefs.prefs?.tools || {};
-      const level = normalizeThinkingLevel(prefs.prefs?.thinking_level);
-      const kb = buildToolsKb(tools, t, level);
-      await ctx.reply(`${TOOLS_INTRO}\nActive now: ${formatActiveTools(t, level)}`, { reply_markup: kb });
-      await upsertActiveChipsMessage(ctx, t, level);
+      const { tools, text, reply_markup } = await toolsView(sid(ctx));
+      await ctx.reply(text, { reply_markup });
+      await upsertActiveChipsMessage(ctx, tools);
     } catch {
       await replyWithMenu(ctx, 'I couldn’t load the tools right now — try again in a bit.');
     }
@@ -1151,8 +1150,8 @@ export function createBot(options = {}) {
         '',
         `Gemini: ${h.ok ? 'connected' : 'not connected'}`,
         `Account: ${acct.status || 'unknown'}${acct.authenticated ? ' · signed in' : ''}`,
-        `Model: ${prefs.prefs?.model || 'account default'}`,
-        `Tools: ${formatActiveTools(prefs.prefs?.tools || {}, prefs.prefs?.thinking_level)}`,
+        `Model: ${prefs.prefs?.model || 'account default'} · Thinking: ${levelLabel(prefs.prefs?.thinking_level)}`,
+        `Tools: ${formatActiveTools(prefs.prefs?.tools || {})}`,
         `Mini App: ${webAppUrl() ? 'ready' : 'not configured'}`,
       ].join('\n'));
     } catch {
@@ -1268,7 +1267,7 @@ export async function startBot(options = {}) {
   try {
     await bot.api.setMyCommands([
       { command: 'start', description: 'Open your private Gemini chat' },
-      { command: 'model', description: 'Pick Flash or Pro' },
+      { command: 'model', description: 'Pick model and thinking level' },
       { command: 'tools', description: 'Turn tools on or off' },
       { command: 'thinking', description: 'Set thinking level (low / medium / high)' },
       { command: 'new', description: 'Start a fresh chat' },

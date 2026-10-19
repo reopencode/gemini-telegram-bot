@@ -13,6 +13,7 @@ import {
   setPrefs,
 } from './geminiClient.js';
 import { listChats, getChat, formatTranscript } from './history.js';
+import { createChatLog, rememberApiResult, deleteTrackedMessages } from './chatLog.js';
 import { historySettings } from './env.js';
 import { refreshGeminiCookies } from './refreshCookies.js';
 import {
@@ -484,6 +485,12 @@ async function deny(ctx) {
 export function createBot(options = {}) {
   seedAllowlistFromEnv();
   const bot = new Bot(requireToken());
+  const chatLog = createChatLog();
+  bot.api.config.use(async (prev, method, payload, signal) => {
+    const res = await prev(method, payload, signal);
+    rememberApiResult(chatLog, method, payload, res);
+    return res;
+  });
   const restartBridgeFn = typeof options.restartBridge === 'function' ? options.restartBridge : null;
 
   // Persistent Telegram reply keyboard next to the chat composer.
@@ -576,6 +583,9 @@ export function createBot(options = {}) {
   async function startNewChat(ctx) {
     const before = listChats(sid(ctx)).length;
     await resetSession(sid(ctx));
+    if (ctx.chat?.type === 'private') {
+      await deleteTrackedMessages(ctx.api, ctx.chat.id, chatLog.take(ctx.chat.id));
+    }
     const saved = listChats(sid(ctx)).length > before;
     return saved
       ? 'Fresh chat ready — your previous chat is saved in History. Send me a message whenever you’re ready.'
@@ -630,6 +640,9 @@ export function createBot(options = {}) {
       return;
     }
     rememberAuthorizedUser(from);
+    if (ctx.chat?.type === 'private' && ctx.msg?.message_id != null) {
+      chatLog.remember(ctx.chat.id, ctx.msg.message_id);
+    }
     await next();
   });
 

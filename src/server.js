@@ -276,8 +276,12 @@ export function startServer() {
       }
 
       if (msg.type === 'reset') {
-        await resetSession(sessionId);
-        ws.send(JSON.stringify({ type: 'reset_ok', session_id: sessionId }));
+        try {
+          await resetSession(sessionId);
+          ws.send(JSON.stringify({ type: 'reset_ok', session_id: sessionId }));
+        } catch (e) {
+          ws.send(JSON.stringify({ type: 'error', error: String(e.message || e) }));
+        }
         return;
       }
       if (msg.type === 'prefs') {

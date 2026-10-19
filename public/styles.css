@@ -59,7 +59,7 @@ body { overflow: hidden; }
 .app.viewing-history .composer,
 .app.viewing-history .tool-chips,
 .app.viewing-history .attach-preview { display: none !important; }
-.model-chip { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-chip { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .messages {
   overflow-y: auto;

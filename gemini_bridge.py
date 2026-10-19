@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -32,24 +33,8 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-# Tools gemini_webapi actually exposes as request flags
+# Tools shown in the UI. Thinking is not a tool: it is a per-chat level.
 SUPPORTED_TOOLS = [
-    {
-        "id": "extended_thinking",
-        "label": "Thinking",
-        "description": "Extended thinking / deeper reasoning (library flag + level steering).",
-        "supported": True,
-        "kind": "flag",
-        "levels": ["low", "medium", "high"],
-        "default_level": "medium",
-    },
-    {
-        "id": "deep_research",
-        "label": "Deep Research",
-        "description": "Deep research plan mode (library flag; needs full auth).",
-        "supported": True,
-        "kind": "flag",
-    },
     {
         "id": "create_image",
         "label": "Create Image",
@@ -71,35 +56,17 @@ SUPPORTED_TOOLS = [
         "supported": True,
         "kind": "media",
     },
-    {
-        "id": "google_search",
-        "label": "Google Search",
-        "description": "Android-style Search toggle — not separately controllable in gemini_webapi.",
-        "supported": False,
-        "kind": "stub",
-    },
-    {
-        "id": "code_execution",
-        "label": "Code execution",
-        "description": "Android-style code tool — not exposed as a toggle in gemini_webapi.",
-        "supported": False,
-        "kind": "stub",
-    },
-    {
-        "id": "canvas",
-        "label": "Canvas",
-        "description": "Android Canvas — not supported by gemini_webapi.",
-        "supported": False,
-        "kind": "stub",
-    },
 ]
+TOOL_IDS = tuple(t["id"] for t in SUPPORTED_TOOLS)
+MEDIA_TOOL_IDS = TOOL_IDS
 
 THINKING_LEVELS = ["low", "medium", "high"]
 DEFAULT_THINKING_LEVEL = "medium"
 
-# gemini_webapi only has an on/off `extended_thinking` flag (payload index 80).
-# While Thinking is on: Low sends the standard flag, Medium and High send extended.
-# High also adds a step-by-step prefix. Medium adds none. Low adds a brief prefix.
+# gemini_webapi only has an on/off `extended_thinking` flag (request payload index 80).
+# The level is always applied: Low uses the standard mode, Medium and High use
+# extended thinking. Low and High also steer the prompt; Medium adds nothing.
+THINKING_EXTENDED = {"low": False, "medium": True, "high": True}
 THINKING_PROMPT_PREFIX = {
     "low": "Reason briefly, then answer concisely.\n\n",
     "medium": "",
@@ -115,16 +82,7 @@ def normalize_thinking_level(level: Any) -> str:
 DEFAULT_PREFS = {
     "model": None,
     "thinking_level": DEFAULT_THINKING_LEVEL,
-    "tools": {
-        "extended_thinking": False,
-        "deep_research": False,
-        "create_image": False,
-        "create_video": False,
-        "create_music": False,
-        "google_search": False,
-        "code_execution": False,
-        "canvas": False,
-    },
+    "tools": {tool_id: False for tool_id in TOOL_IDS},
 }
 
 MEDIA_PROMPT_PREFIX = {
@@ -145,28 +103,53 @@ _client_lock = asyncio.Lock()
 _chats: dict[str, Any] = {}
 
 
+_prefs_cache: dict | None = None
+_prefs_stamp: tuple[int, int] | None = None
+
+
+def _prefs_file_stamp() -> tuple[int, int] | None:
+    try:
+        st = PREFS_PATH.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def _load_prefs() -> dict:
-    if PREFS_PATH.exists():
+    """All sessions' prefs. Re-read only when the file changed on disk."""
+    global _prefs_cache, _prefs_stamp
+    stamp = _prefs_file_stamp()
+    if _prefs_cache is not None and stamp == _prefs_stamp:
+        return _prefs_cache
+    data: dict = {}
+    if stamp is not None:
         try:
-            return json.loads(PREFS_PATH.read_text())
+            loaded = json.loads(PREFS_PATH.read_text())
+            if isinstance(loaded, dict):
+                data = loaded
         except Exception:
-            return {}
-    return {}
+            data = {}
+    _prefs_cache, _prefs_stamp = data, stamp
+    return data
 
 
 def _save_prefs(data: dict) -> None:
-    PREFS_PATH.write_text(json.dumps(data, indent=2))
+    global _prefs_cache, _prefs_stamp
+    tmp = PREFS_PATH.with_name(f"{PREFS_PATH.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(PREFS_PATH)
+    _prefs_cache, _prefs_stamp = data, _prefs_file_stamp()
 
 
 def get_session_prefs(session_id: str) -> dict:
-    all_prefs = _load_prefs()
-    prefs = all_prefs.get(session_id) or {}
-    merged = {
+    prefs = _load_prefs().get(session_id) or {}
+    saved_tools = prefs.get("tools") or {}
+    return {
         "model": prefs.get("model", DEFAULT_PREFS["model"]),
         "thinking_level": normalize_thinking_level(prefs.get("thinking_level")),
-        "tools": {**DEFAULT_PREFS["tools"], **(prefs.get("tools") or {})},
+        # Only current tools; keys left from older versions (thinking, search...) are dropped.
+        "tools": {t: bool(saved_tools.get(t, False)) for t in TOOL_IDS},
     }
-    return merged
 
 
 def set_session_prefs(
@@ -176,17 +159,18 @@ def set_session_prefs(
     tools: dict | None = None,
     thinking_level: str | None = None,
 ) -> dict:
-    all_prefs = _load_prefs()
+    """Merge any of model / tools / level and write at most once."""
     cur = get_session_prefs(session_id)
+    new = {**cur, "tools": dict(cur["tools"])}
     if model is not None:
-        cur["model"] = model or None
+        new["model"] = model or None
     if thinking_level is not None:
-        cur["thinking_level"] = normalize_thinking_level(thinking_level)
+        new["thinking_level"] = normalize_thinking_level(thinking_level)
     if tools is not None:
-        cur["tools"] = {**cur["tools"], **tools}
-    all_prefs[session_id] = cur
-    _save_prefs(all_prefs)
-    return cur
+        new["tools"].update({k: bool(v) for k, v in tools.items() if k in TOOL_IDS})
+    if new != cur or session_id not in _load_prefs():
+        _save_prefs({**_load_prefs(), session_id: new})
+    return new
 
 
 def _load_cookies() -> tuple[str, str]:
@@ -250,6 +234,24 @@ def _serialize_models(client: GeminiClient) -> list[dict]:
     return out
 
 
+MODELS_TTL_SECONDS = 60.0
+_models_cache: tuple[int, float, list[dict]] | None = None
+
+
+def _cached_models(client: GeminiClient) -> list[dict]:
+    global _models_cache
+    now = time.monotonic()
+    if (
+        _models_cache is not None
+        and _models_cache[0] == id(client)
+        and now - _models_cache[1] < MODELS_TTL_SECONDS
+    ):
+        return _models_cache[2]
+    out = _serialize_models(client)
+    _models_cache = (id(client), now, out)
+    return out
+
+
 def _account_info(client: GeminiClient) -> dict:
     status = client.account_status
     name = getattr(status, "name", str(status))
@@ -295,12 +297,17 @@ class ChatResponse(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    # Lazy-init on first request so 429 / transient auth issues don't block the HTTP server.
+    # Warm the client in the background so the HTTP server accepts requests immediately
+    # and a 429 / transient auth issue never blocks startup.
     app.state.startup_error = None
-    try:
-        await get_client()
-    except Exception as e:
-        app.state.startup_error = str(e)
+
+    async def warm():
+        try:
+            await get_client()
+        except Exception as e:
+            app.state.startup_error = str(e)
+
+    app.state.warm_task = asyncio.create_task(warm())
 
 
 @app.get("/health")
@@ -444,12 +451,15 @@ async def models():
         client = await get_client()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Gemini client unavailable: {e}") from e
-    return {"models": _serialize_models(client), "account": _account_info(client)}
+    return {"models": _cached_models(client), "account": _account_info(client)}
 
 
 @app.get("/tools")
 async def tools():
-    return {"tools": SUPPORTED_TOOLS}
+    return {
+        "tools": SUPPORTED_TOOLS,
+        "thinking": {"levels": THINKING_LEVELS, "default": DEFAULT_THINKING_LEVEL},
+    }
 
 
 @app.get("/prefs")
@@ -475,16 +485,11 @@ async def prefs_set(req: PrefsRequest):
 def _steer_prompt(prompt: str, tools: dict, thinking_level: str | None = None) -> str:
     """Best-effort Android-like Create Image/Video/Music via prompt steering.
 
-    When extended thinking is on, the thinking level adds a reasoning prefix
-    (medium adds none).
+    Without a media tool the thinking level adds its reasoning prefix (medium
+    adds none). With a media tool the prompt is the generation request, so the
+    reasoning prefix is skipped; the level still sets the extended-thinking flag.
     """
     p = (prompt or "").strip()
-    if tools.get("extended_thinking") and not any(
-        tools.get(k) for k in ("create_image", "create_video", "create_music")
-    ):
-        prefix = THINKING_PROMPT_PREFIX.get(normalize_thinking_level(thinking_level), "")
-        if prefix and p:
-            return prefix + p
     # Priority if multiple media tools on: image > video > music
     for key in ("create_image", "create_video", "create_music"):
         if tools.get(key):
@@ -493,7 +498,8 @@ def _steer_prompt(prompt: str, tools: dict, thinking_level: str | None = None) -
             if p.lower().startswith("generate an image") or p.lower().startswith("generate a short video") or p.lower().startswith("generate a piece of music"):
                 return p
             return prefix + (p or "a creative result")
-    return p
+    prefix = THINKING_PROMPT_PREFIX.get(normalize_thinking_level(thinking_level), "")
+    return prefix + p if prefix and p else p
 
 
 async def _collect_media(result) -> list[MediaItem]:
@@ -679,18 +685,12 @@ async def _prepare_turn(
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Gemini client unavailable: {e}") from e
 
-    prefs = get_session_prefs(session_id)
-    if model is not None:
-        prefs = set_session_prefs(session_id, model=model)
-    if tools is not None:
-        prefs = set_session_prefs(session_id, tools=tools)
-    if thinking_level is not None:
-        prefs = set_session_prefs(session_id, thinking_level=thinking_level)
+    prefs = set_session_prefs(
+        session_id, model=model, tools=tools, thinking_level=thinking_level
+    )
 
     use_model = prefs.get("model") or None
     t = prefs.get("tools") or {}
-    tool_thinking = bool(t.get("extended_thinking"))
-    deep_research = bool(t.get("deep_research"))
 
     # Soft fallback: advanced models require AVAILABLE auth; keep chat usable
     # (tools still apply) when cookies are guest/unauthenticated.
@@ -710,8 +710,7 @@ async def _prepare_turn(
 
     thinking_level_out = normalize_thinking_level(prefs.get("thinking_level"))
     prompt = _steer_prompt(prompt, t, thinking_level_out)
-    # On/off library flag. Thinking off ignores the level. Low is standard; Medium and High are extended.
-    request_thinking = tool_thinking and thinking_level_out != "low"
+    request_thinking = THINKING_EXTENDED[thinking_level_out]
 
     files_arg: list | None = None
     if file_paths:
@@ -727,19 +726,21 @@ async def _prepare_turn(
 
     kwargs: dict[str, Any] = {
         "temporary": False,
-        "deep_research": deep_research,
         "extended_thinking": request_thinking,
     }
     if files_arg:
         kwargs["files"] = files_arg
 
     tools_out = {
-        "extended_thinking": tool_thinking,
-        "deep_research": deep_research,
         "create_image": bool(t.get("create_image")),
         "create_video": bool(t.get("create_video")),
         "create_music": bool(t.get("create_music")),
     }
+    print(
+        f"[bridge] turn session={session_id} model={use_model or 'default'} "
+        f"thinking={thinking_level_out} extended_thinking={request_thinking} "
+        f"tools={[k for k, v in tools_out.items() if v]}"
+    )
     return {
         "chat": chat,
         "prompt": prompt,
@@ -910,8 +911,10 @@ async def chat_upload(
                 raise HTTPException(status_code=400, detail=f"File too large: {f.filename}")
             suffix = Path(f.filename or "upload.bin").suffix or ".bin"
             safe_name = Path(f.filename or "upload.bin").name.replace("/", "_")
-            named = Path(tempfile.mktemp(prefix="gem_", suffix="_" + safe_name, dir=str(UPLOAD_DIR)))
-            named.write_bytes(raw)
+            fd, tmp_name = tempfile.mkstemp(prefix="gem_", suffix="_" + safe_name, dir=str(UPLOAD_DIR))
+            named = Path(tmp_name)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
             saved.append(named)
 
         # Best-effort: for .txt/.md/.csv/.json append text extract into prompt if no images

@@ -8,28 +8,55 @@
  * Persisted at HISTORY_PATH (default data/history.json). Lookup is always keyed by
  * session id, so a user can only see their own chats.
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, statSync, mkdirSync, renameSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { historyPath, historySettings } from './env.js';
 
+/**
+ * Parsed file kept in memory. It is re-read only when the file on disk changed
+ * (another process, a manual edit, a different HISTORY_PATH).
+ */
+let cache = null;
+
+function stamp(file) {
+  try {
+    const st = statSync(file, { bigint: true });
+    return `${file}:${st.mtimeNs}:${st.size}`;
+  } catch {
+    return null;
+  }
+}
+
 function load() {
   const file = historyPath();
-  if (!existsSync(file)) return {};
-  try {
-    const data = JSON.parse(readFileSync(file, 'utf8'));
-    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
-  } catch {
-    return {};
+  const now = stamp(file);
+  if (cache && cache.stamp === now) return cache.data;
+  let data = {};
+  if (now) {
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) data = parsed;
+    } catch {
+      data = {};
+    }
   }
+  cache = { stamp: now, data };
+  return data;
 }
 
 function save(data) {
   const file = historyPath();
   mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2));
-  renameSync(tmp, file);
+  try {
+    writeFileSync(tmp, JSON.stringify(data));
+    renameSync(tmp, file);
+  } catch (e) {
+    cache = null;
+    throw e;
+  }
+  cache = { stamp: stamp(file), data };
 }
 
 function entry(data, sessionId) {

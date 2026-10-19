@@ -153,27 +153,23 @@ Mini App UI   ──► WS /api/chat ─┘                         (session coo
 
 ## Models, tools, files
 
-### Models
-- Mini App: **Model** chip opens a bottom sheet of `list_models()` results.
-- Telegram: `/model` inline keyboard. Choice is persisted per chat in `data/prefs.json` (local only; not committed).
+### Models and thinking level
+- Mini App: **Model** chip opens a bottom sheet with the **Thinking level** control (Low / Medium / High) on top, then the `list_models()` results. The chip shows e.g. `Flash · Medium`.
+- Telegram: `/model` inline keyboard (models, then a Low / Medium / High row). `/thinking` opens just the level row. `/status` shows `Model: … · Thinking: Medium`.
+- Model and level are persisted per chat in `data/prefs.json` (local only; not committed) as `model` and `thinking_level`.
+
+The thinking level is always applied (default **Medium**); it is not a tool and has no on/off switch. `gemini_webapi` only has an on/off `extended_thinking` flag (request payload index 80), so the level is that flag plus prompt steering:
+
+| Level | `extended_thinking` | Prompt prefix |
+|-------|---------------------|---------------|
+| Low | off (standard mode, fastest) | "Reason briefly, then answer concisely." |
+| Medium | on | none |
+| High | on | "Reason step by step and double-check your work before answering." |
+
+With Create Image / Video / Music on, the prompt is the generation request, so the reasoning prefix is skipped; the flag still follows the level. Each turn logs a line like `[bridge] turn … thinking=high extended_thinking=True` so you can confirm what was sent.
 
 ### Tools
-| Tool | Status |
-|------|--------|
-| Thinking (`extended_thinking`) | Supported via gemini_webapi flag, with a Low / Medium / High level (see below) |
-| Deep Research (`deep_research`) | Supported via gemini_webapi flag (needs signed-in account) |
-| Google Search / Code / Canvas | **Stub UI only** — library has no separate toggles |
-
-### Thinking level
-
-When **Thinking** is on you can pick **Low / Medium / High** (default **Medium**), stored per chat in `data/prefs.json` as `thinking_level`.
-
-- Telegram: the `/tools` picker shows a level row under Thinking, or use `/thinking`. Active chips and `/status` show e.g. `Thinking · Medium`.
-- Mini App: **Tools** sheet shows a Low / Medium / High control under Thinking; the chip shows the level.
-- `gemini_webapi` only has an on/off `extended_thinking` flag, so the level is best-effort prompt steering on top of it: Low asks for brief reasoning, Medium is the plain flag (no extra prompt), High asks for step-by-step reasoning with a double-check. Create Image / Video / Music steering takes priority over the level prefix. With Thinking off, the level is kept but ignored.
-
-Telegram: `/tools` (full picker). **Sticky chips**: active tools appear as inline buttons under the “Active tools” status message and under bot replies; tap `×` to turn one off. Prefs stay on until deselected. Mini App: **Tools** sheet + chip row above the composer.
-
+Only the three media tools are listed (Mini App **Tools** sheet, Telegram `/tools`). **Sticky chips**: active tools appear as inline buttons under the “Active tools” status message and under bot replies; tap `×` to turn one off. Prefs stay on until deselected. Mini App: **Tools** sheet + chip row above the composer.
 
 ### Create Image / Video / Music
 

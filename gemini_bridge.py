@@ -97,8 +97,9 @@ SUPPORTED_TOOLS = [
 THINKING_LEVELS = ["low", "medium", "high"]
 DEFAULT_THINKING_LEVEL = "medium"
 
-# gemini_webapi only has an on/off `extended_thinking` flag, so levels are
-# best-effort prompt steering. Medium is the plain flag (no prefix).
+# gemini_webapi only has an on/off `extended_thinking` flag (payload index 80).
+# While Thinking is on: Low sends the standard flag, Medium and High send extended.
+# High also adds a step-by-step prefix. Medium adds none. Low adds a brief prefix.
 THINKING_PROMPT_PREFIX = {
     "low": "Reason briefly, then answer concisely.\n\n",
     "medium": "",
@@ -688,7 +689,7 @@ async def _prepare_turn(
 
     use_model = prefs.get("model") or None
     t = prefs.get("tools") or {}
-    extended_thinking = bool(t.get("extended_thinking"))
+    tool_thinking = bool(t.get("extended_thinking"))
     deep_research = bool(t.get("deep_research"))
 
     # Soft fallback: advanced models require AVAILABLE auth; keep chat usable
@@ -709,6 +710,8 @@ async def _prepare_turn(
 
     thinking_level_out = normalize_thinking_level(prefs.get("thinking_level"))
     prompt = _steer_prompt(prompt, t, thinking_level_out)
+    # On/off library flag. Thinking off ignores the level. Low is standard; Medium and High are extended.
+    request_thinking = tool_thinking and thinking_level_out != "low"
 
     files_arg: list | None = None
     if file_paths:
@@ -725,13 +728,13 @@ async def _prepare_turn(
     kwargs: dict[str, Any] = {
         "temporary": False,
         "deep_research": deep_research,
-        "extended_thinking": extended_thinking,
+        "extended_thinking": request_thinking,
     }
     if files_arg:
         kwargs["files"] = files_arg
 
     tools_out = {
-        "extended_thinking": extended_thinking,
+        "extended_thinking": tool_thinking,
         "deep_research": deep_research,
         "create_image": bool(t.get("create_image")),
         "create_video": bool(t.get("create_video")),

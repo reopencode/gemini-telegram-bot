@@ -99,15 +99,28 @@ class PrepareTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(out["kwargs"]["extended_thinking"])
         self.assertIn(gemini_bridge.THINKING_PROMPT_PREFIX["high"], out["prompt"])
 
+    async def test_low_level_uses_standard_thinking_flag(self):
+        out = await self._prepare(tools={"extended_thinking": True}, thinking_level="low")
+        self.assertEqual(out["thinking_level"], "low")
+        self.assertFalse(out["kwargs"]["extended_thinking"])
+        self.assertNotIn(gemini_bridge.THINKING_PROMPT_PREFIX["high"], out["prompt"])
+
+    async def test_thinking_off_ignores_level(self):
+        out = await self._prepare(tools={"extended_thinking": False}, thinking_level="high")
+        self.assertFalse(out["kwargs"]["extended_thinking"])
+        self.assertEqual(out["prompt"], "why?")
+
     async def test_stored_level_is_used_when_request_omits_it(self):
         gemini_bridge.set_session_prefs("s2", thinking_level="low")
         out = await self._prepare(tools={"extended_thinking": True})
         self.assertEqual(out["thinking_level"], "low")
+        self.assertFalse(out["kwargs"]["extended_thinking"])
         self.assertIn(gemini_bridge.THINKING_PROMPT_PREFIX["low"], out["prompt"])
 
     async def test_default_medium_leaves_prompt_unchanged(self):
         out = await self._prepare(tools={"extended_thinking": True})
         self.assertEqual(out["thinking_level"], "medium")
+        self.assertTrue(out["kwargs"]["extended_thinking"])
         self.assertEqual(out["prompt"], "why?")
 
 

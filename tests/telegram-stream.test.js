@@ -381,11 +381,12 @@ describe('telegram gemini streaming', { concurrency: 1 }, () => {
   test('commands and reply-keyboard buttons do not open a stream', async () => {
     state.mode = 'stream-ok';
     const bot = createBot();
-    await send(bot, '/new', 19, {
+    const calls = await send(bot, '/new', 19, {
       entities: [{ type: 'bot_command', offset: 0, length: 4 }],
     });
     assert.equal(bridgeHits.some((h) => h.path === '/chat_stream'), false);
     assert.ok(bridgeHits.some((h) => h.path === '/reset'));
+    assert.ok(calls.some((c) => c.method === 'deleteMessage' && c.message_id === 19));
     await send(bot, 'Model', 20);
     assert.equal(bridgeHits.some((h) => h.path === '/chat_stream'), false);
     assert.ok(bridgeHits.some((h) => h.path === '/models'));

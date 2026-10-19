@@ -214,6 +214,14 @@ import { appendReplyContent } from './videoReply.js';
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
+  /** Leave a read-only archive without putting the previous live bubbles back. */
+  function abandonHistoryView() {
+    viewingHistory = false;
+    parkedMessages = null;
+    appEl.classList.remove('viewing-history');
+    historyBanner.classList.add('hidden');
+  }
+
   async function openArchivedChat(id) {
     const { chat } = await api(`/api/history/${encodeURIComponent(id)}`);
     if (!viewingHistory) parkedMessages = Array.from(messagesEl.childNodes);
@@ -601,15 +609,17 @@ import { appendReplyContent } from './videoReply.js';
 
   btnNew.addEventListener('click', async () => {
     if (!authed || busy) return;
-    exitHistory();
+    abandonHistoryView();
+    showWelcome();
     setBusy(true);
     try {
       if (!useHttp && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'reset' }));
       } else {
         await api('/api/reset', { method: 'POST', json: {} });
-        showWelcome();
       }
+    } catch (e) {
+      addBubble('ai', String(e.message || e), 'error');
     } finally {
       setBusy(false);
     }

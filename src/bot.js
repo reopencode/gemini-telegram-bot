@@ -1,6 +1,7 @@
 import { unlinkSync } from 'node:fs';
 import { Bot, InlineKeyboard } from 'grammy';
 import { VIDEO_READY_TEXT, withoutVideos as stripVideoMedia } from '../public/videoReply.js';
+import { defaultModelLabel, modelOptionLabel } from '../public/modelChoice.js';
 import {
   chat,
   chatStream,
@@ -50,7 +51,7 @@ const TOOL_LABELS = {
 
 const GEMINI_ERROR_MESSAGE = 'Gemini didn’t answer — try again in a bit.';
 const THINKING_INTRO = 'Thinking level — Low is quick, Medium is balanced, High reasons deepest.';
-const MODEL_INTRO = `Pick a model for this chat — Flash or Pro.\n${THINKING_INTRO}`;
+const MODEL_INTRO = `Pick a model for this chat. Default is recommended — Flash and Pro are unreliable.\n${THINKING_INTRO}`;
 const TOOLS_INTRO = 'Tools — Tap to turn on or off. Active ones stay on until you tap them again.';
 
 export const THINKING_LEVELS = ['low', 'medium', 'high'];
@@ -119,11 +120,9 @@ export function buildToolsKb(catalog = [], tools = {}) {
 /** Model picker; the thinking level row sits under the models. */
 export function buildModelKb(models = [], current, level) {
   const kb = new InlineKeyboard();
-  kb.text(current ? 'Default' : '✓ Default', 'model:').row();
+  kb.text(defaultModelLabel(!current), 'model:').row();
   for (const m of models) {
-    const mark = current === m.id ? '✓ ' : '';
-    const avail = m.available ? '' : ' (limited)';
-    kb.text(`${mark}${m.display_name || m.id}${avail}`, `model:${m.id}`).row();
+    kb.text(modelOptionLabel(m, current === m.id), `model:${m.id}`).row();
   }
   return addThinkingRow(kb, level);
 }

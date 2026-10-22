@@ -73,6 +73,8 @@ Mini App: the admin sheet can allow/deny by `@username` or numeric user id. All 
 | `TUNNEL_HOST` | no | Host cloudflared forwards to (default `127.0.0.1`; port is `PORT`) |
 | `SKIP_BRIDGE` | no | Set `1` if you start the Python bridge yourself |
 | `GEMINI_DEEP_HEALTH_TIMEOUT` | no | Seconds for `GET /health/deep` quota probe (default `15`) |
+| `GEMINI_TIMEOUT` | no | Seconds passed to `GeminiClient.init` (default `180`; the library default is `450`). Too low a value aborts a reply that is still thinking and the library closes the shared connection |
+| `TURN_TIMEOUT` | no | Seconds before one bridge turn is stopped with a clear message (default `240`), including a single default-model retry. The shared client is left open |
 
 ## Setup
 
@@ -154,9 +156,10 @@ Mini App UI   ──► WS /api/chat ─┘                         (session coo
 ## Models, tools, files
 
 ### Models and thinking level
-- Mini App: **Model** chip opens a bottom sheet with the **Thinking level** control (Low / Medium / High) on top, then the `list_models()` results. The chip shows e.g. `Flash · Medium`.
-- Telegram: `/model` inline keyboard (models, then a Low / Medium / High row). `/thinking` opens just the level row. `/status` shows `Model: … · Thinking: Medium`.
+- Mini App: **Model** chip opens a bottom sheet with the **Thinking level** control (Low / Medium / High) on top, then the `list_models()` results. The chip shows e.g. `Flash · Medium`. **Default (recommended)** is the first choice. `gemini-flash` and `gemini-pro` stay in the list and are marked unreliable.
+- Telegram: `/model` inline keyboard (Default, then the models, then a Low / Medium / High row). `/thinking` opens just the level row. `/status` shows `Model: … · Thinking: Medium`.
 - Model and level are persisted per chat in `data/prefs.json` (local only; not committed) as `model` and `thinking_level`.
+- If a turn with an explicit model errors, hits `TURN_TIMEOUT`, comes back empty, or comes back as a known generic failure (`Sorry, something went wrong`, `I encountered an error doing what you asked`, `Unknown API error code: 1097`), the bridge retries that turn **once** on the default model. The reply is prefixed with a short note, and a stream `notice` event carries the same note. The saved model choice is not changed. A turn that is still going when `TURN_TIMEOUT` elapses stops with a clear message; that path does not close the shared Gemini client.
 
 The thinking level is always applied (default **Medium**); it is not a tool and has no on/off switch. `gemini_webapi` only has an on/off `extended_thinking` flag (request payload index 80), so the level is that flag plus prompt steering:
 

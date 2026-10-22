@@ -186,16 +186,42 @@ def _load_cookies() -> tuple[str, str]:
     return psid, psidts
 
 
+def _client_alive(client) -> bool:
+    """False once GeminiClient.close() has dropped the shared session.
+
+    Duck-typed fakes that have no inner session are left alone. Replacing a
+    closed client is how the next turn recovers; this helper never closes one.
+    """
+    if client is None:
+        return False
+    if getattr(client, "_running", True) is False:
+        return False
+    try:
+        inner = client.client
+    except AttributeError:
+        return True
+    return inner is not None
+
+
 async def get_client() -> GeminiClient:
     global _client
-    if _client is not None:
+    if _client_alive(_client):
         return _client
     async with _client_lock:
-        if _client is not None:
+        if _client_alive(_client):
             return _client
+        if _client is not None:
+            # The library closes this session on its own watchdog and on some
+            # API errors. Drop the dead object so other turns can reconnect.
+            print("[bridge] shared Gemini client is closed; opening a new one")
+            _client = None
         psid, psidts = _load_cookies()
         client = GeminiClient(psid, psidts or None)
-        await client.init(timeout=60, auto_refresh=True, auto_close=False)
+        await client.init(
+            timeout=float(os.environ.get("GEMINI_TIMEOUT", "180")),
+            auto_refresh=True,
+            auto_close=False,
+        )
         _client = client
         return client
 
@@ -293,6 +319,8 @@ class ChatResponse(BaseModel):
     tools: dict[str, bool] | None = None
     thinking_level: str | None = None
     media: list[MediaItem] = []
+    # True when an explicit model failed and this reply came from the default model.
+    fallback: bool = False
 
 
 @app.on_event("startup")
@@ -670,6 +698,185 @@ def _clean_reply_text(text: str) -> str:
     return text or ""
 
 
+# Short junk replies seen when an explicitly chosen model fails.
+_GENERIC_FAILURES = (
+    "sorry, something went wrong",
+    "i encountered an error doing what you asked",
+    "unknown api error code: 1097",
+)
+FALLBACK_NOTE = "The selected model failed, so this reply used the default model.\n\n"
+TURN_STOPPED_MESSAGE = "This turn took too long and was stopped. Please try again."
+_STREAM_END = object()
+
+
+class TurnBudgetExceeded(Exception):
+    """The per-turn deadline fired. The shared Gemini client is not closed."""
+
+
+def _turn_timeout() -> float:
+    """Overall cap for one turn, including a single default-model retry."""
+    raw = os.environ.get("TURN_TIMEOUT", "240")
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        return 240.0
+    return timeout if timeout > 0 else 240.0
+
+
+def _is_generic_failure(text: str) -> bool:
+    cleaned = " ".join((text or "").split())
+    if not cleaned or len(cleaned) > 400:
+        return False
+    low = cleaned.lower()
+    return any(snippet in low for snippet in _GENERIC_FAILURES)
+
+
+def _result_text(result) -> str:
+    if result is None:
+        return ""
+    raw = getattr(result, "text", None)
+    if not isinstance(raw, str):
+        raw = str(result)
+    return _clean_reply_text(raw)
+
+
+def _can_fallback(prepared: dict) -> bool:
+    return bool(prepared.get("use_model")) and not prepared.get("fell_back")
+
+
+def _needs_text_fallback(prepared: dict, text: str, media: list) -> bool:
+    if not _can_fallback(prepared):
+        return False
+    if media:
+        return False
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return True
+    return _is_generic_failure(cleaned)
+
+
+def _prefix_fallback_note(text: str) -> str:
+    body = text or ""
+    if body.startswith(FALLBACK_NOTE):
+        return body
+    return FALLBACK_NOTE + body
+
+
+def _visible_text(prepared: dict, text: str) -> str:
+    if prepared.get("fell_back"):
+        return _prefix_fallback_note(text)
+    return text or ""
+
+
+def _timeout_text(prepared: dict) -> str:
+    if prepared.get("fell_back"):
+        return _prefix_fallback_note(TURN_STOPPED_MESSAGE)
+    return TURN_STOPPED_MESSAGE
+
+
+async def _await_bounded(awaitable, deadline: float):
+    """Wait until `deadline`. Cancel this attempt only — never the shared client."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        raise TurnBudgetExceeded()
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=remaining)
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    if task in done:
+        return task.result()
+    task.cancel()
+
+    def _drain(finished: asyncio.Task) -> None:
+        try:
+            finished.exception()
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    task.add_done_callback(_drain)
+    raise TurnBudgetExceeded()
+
+
+async def _next_stream_item(agen, deadline: float):
+    async def pull():
+        try:
+            return await agen.__anext__()
+        except StopAsyncIteration:
+            return _STREAM_END
+
+    return await _await_bounded(pull(), deadline)
+
+
+async def _quiet_aclose(agen) -> None:
+    aclose = getattr(agen, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except (Exception, asyncio.CancelledError):
+        pass
+
+
+async def _retry_with_default(prepared: dict) -> dict:
+    """One new chat on the default model. Does not change the saved preference."""
+    client = prepared.get("client")
+    if not _client_alive(client):
+        client = await get_client()
+    session_id = prepared["session_id"]
+    _chats.pop(session_id, None)
+    chat = client.start_chat()
+    _chats[session_id] = chat
+    print(
+        f"[bridge] model {prepared.get('use_model')} failed; "
+        "retrying once with the default model"
+    )
+    return {
+        **prepared,
+        "client": client,
+        "chat": chat,
+        "use_model": None,
+        "fell_back": True,
+    }
+
+
+def _chat_response(prepared: dict, text: str, media: list) -> ChatResponse:
+    return ChatResponse(
+        text=text or "",
+        session_id=prepared["session_id"],
+        model=prepared.get("use_model"),
+        tools=prepared["tools_out"],
+        thinking_level=prepared["thinking_level"],
+        media=media,
+        fallback=bool(prepared.get("fell_back")),
+    )
+
+
+def _final_event(prepared: dict, text: str, media: list) -> dict:
+    return {
+        "type": "final",
+        "text": text or "",
+        "session_id": prepared["session_id"],
+        "model": prepared.get("use_model"),
+        "tools": prepared["tools_out"],
+        "thinking_level": prepared["thinking_level"],
+        "media": [m.model_dump() for m in media],
+        "fallback": bool(prepared.get("fell_back")),
+    }
+
+
+def _fallback_failed_response(prepared: dict) -> ChatResponse:
+    failed = {**prepared, "fell_back": True, "use_model": None}
+    return _chat_response(
+        failed,
+        _prefix_fallback_note("The default model also failed. Please try again."),
+        [],
+    )
+
+
 async def _prepare_turn(
     *,
     prompt: str,
@@ -743,13 +950,31 @@ async def _prepare_turn(
     )
     return {
         "chat": chat,
+        "client": client,
         "prompt": prompt,
         "kwargs": kwargs,
         "use_model": use_model,
         "session_id": session_id,
         "tools_out": tools_out,
         "thinking_level": thinking_level_out,
+        "fell_back": False,
     }
+
+
+async def _finish_model_output(result, text: str, deadline: float):
+    """Collect media within the turn budget. Returns (text, media) or raises TurnBudgetExceeded."""
+    try:
+        media_items = await _await_bounded(_collect_media(result), deadline)
+    except TurnBudgetExceeded:
+        media_items = []
+        if not (text or "").strip():
+            raise
+    except Exception as media_err:
+        print(f"[bridge] media collect failed: {type(media_err).__name__}")
+        media_items = []
+    if not text and media_items:
+        text = f"(generated {len(media_items)} media file(s))"
+    return _withhold_videos(text, media_items)
 
 
 async def _run_chat(
@@ -761,6 +986,12 @@ async def _run_chat(
     file_paths: list[Path] | None = None,
     thinking_level: str | None = None,
 ) -> ChatResponse:
+    """One-shot turn used by /chat and /chat_upload.
+
+    An explicit model that errors, times out, is empty, or returns a known
+    generic failure is retried once on the default model. The saved preference
+    is not changed. A hung turn stops at TURN_TIMEOUT without closing the client.
+    """
     try:
         prepared = await _prepare_turn(
             prompt=prompt,
@@ -770,24 +1001,45 @@ async def _run_chat(
             file_paths=file_paths,
             thinking_level=thinking_level,
         )
-        result = await prepared["chat"].send_message(prepared["prompt"], **prepared["kwargs"])
-        text = _clean_reply_text(getattr(result, "text", None) or str(result))
-        media_items = await _collect_media(result)
-        if not text and media_items:
-            text = f"(generated {len(media_items)} media file(s))"
-        text, media_items = _withhold_videos(text, media_items)
-        return ChatResponse(
-            text=text or "",
-            session_id=prepared["session_id"],
-            model=prepared["use_model"],
-            tools=prepared["tools_out"],
-            thinking_level=prepared["thinking_level"],
-            media=media_items,
-        )
+        deadline = time.monotonic() + _turn_timeout()
+        while True:
+            try:
+                result = await _await_bounded(
+                    prepared["chat"].send_message(prepared["prompt"], **prepared["kwargs"]),
+                    deadline,
+                )
+            except TurnBudgetExceeded:
+                return _chat_response(prepared, _timeout_text(prepared), [])
+            except HTTPException:
+                raise
+            except Exception as e:
+                if _can_fallback(prepared):
+                    try:
+                        prepared = await _retry_with_default(prepared)
+                    except Exception as retry_err:
+                        print(f"[bridge] default-model retry failed: {type(retry_err).__name__}")
+                        return _fallback_failed_response(prepared)
+                    continue
+                if prepared.get("fell_back"):
+                    print(f"[bridge] default-model retry failed: {type(e).__name__}")
+                    return _fallback_failed_response(prepared)
+                raise HTTPException(status_code=502, detail=f"Gemini request failed: {e}") from e
+
+            text = _result_text(result)
+            try:
+                text, media_items = await _finish_model_output(result, text, deadline)
+            except TurnBudgetExceeded:
+                return _chat_response(prepared, _timeout_text(prepared), [])
+            if _needs_text_fallback(prepared, text, media_items):
+                try:
+                    prepared = await _retry_with_default(prepared)
+                except Exception:
+                    print("[bridge] default-model retry failed")
+                    return _fallback_failed_response(prepared)
+                continue
+            return _chat_response(prepared, _visible_text(prepared, text), media_items)
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Gemini request failed: {e}") from e
     finally:
         if file_paths:
             for p in file_paths:
@@ -803,8 +1055,14 @@ async def chat_stream(req: ChatRequest):
 
     Events:
       {"type":"partial","text":"<full text so far>"}
-      {"type":"final","text":"...","media":[...],"session_id","model","tools"}
+      {"type":"notice","text":"...","fallback":true}
+      {"type":"final","text":"...","media":[...],"session_id","model","tools","fallback"}
       {"type":"error","detail":"...","started":bool}
+
+    An explicit model that errors, times out, is empty, or returns a known
+    generic failure is retried once on the default model. The notice and the
+    reply text both say so. A hung turn ends as a final message at TURN_TIMEOUT
+    so the client does not resend; the shared Gemini client is not closed.
 
     Failures before the body starts are normal HTTP errors so the Node client
     can fall back to POST /chat. Failures after the stream opens are a final
@@ -819,48 +1077,94 @@ async def chat_stream(req: ChatRequest):
         thinking_level=req.thinking_level,
     )
 
+    deadline = time.monotonic() + _turn_timeout()
+
     async def gen():
-        acc = ""
-        last = None
-        try:
-            async for output in prepared["chat"].send_message_stream(
-                prepared["prompt"], **prepared["kwargs"]
-            ):
-                last = output
-                new_acc = merge_stream_text(acc, output)
-                if new_acc != acc:
-                    acc = new_acc
-                    # Video is not delivered. Keep the placeholder until the ready notice.
-                    if not prepared["tools_out"].get("create_video"):
-                        yield _ndjson({"type": "partial", "text": acc})
-            text = _clean_reply_text(acc)
+        current = prepared
+        while True:
+            agen = current["chat"].send_message_stream(current["prompt"], **current["kwargs"])
+            acc = ""
+            last = None
+            abandon = False
             try:
-                media_items = await _collect_media(last)
-            except Exception as media_err:
-                print(f"[bridge] stream media collect failed: {media_err}")
-                media_items = []
-            if not text and media_items:
-                text = f"(generated {len(media_items)} media file(s))"
-            text, media_items = _withhold_videos(text, media_items)
-            yield _ndjson(
-                {
-                    "type": "final",
-                    "text": text or "",
-                    "session_id": prepared["session_id"],
-                    "model": prepared["use_model"],
-                    "tools": prepared["tools_out"],
-                    "thinking_level": prepared["thinking_level"],
-                    "media": [m.model_dump() for m in media_items],
-                }
-            )
-        except Exception as e:
-            yield _ndjson(
-                {
-                    "type": "error",
-                    "detail": f"Gemini request failed: {e}",
-                    "started": last is not None,
-                }
-            )
+                while True:
+                    item = await _next_stream_item(agen, deadline)
+                    if item is _STREAM_END:
+                        break
+                    last = item
+                    new_acc = merge_stream_text(acc, item)
+                    if new_acc != acc:
+                        acc = new_acc
+                        # Video is not delivered. Keep the placeholder until the ready notice.
+                        if not current["tools_out"].get("create_video"):
+                            yield _ndjson({"type": "partial", "text": _visible_text(current, acc)})
+                text = _clean_reply_text(acc)
+                try:
+                    text, media_items = await _finish_model_output(last, text, deadline)
+                except TurnBudgetExceeded:
+                    abandon = True
+                    yield _ndjson(_final_event(current, _timeout_text(current), []))
+                    return
+                if _needs_text_fallback(current, text, media_items):
+                    try:
+                        current = await _retry_with_default(current)
+                    except Exception:
+                        print("[bridge] default-model retry failed")
+                        yield _ndjson(_final_event(
+                            {**current, "fell_back": True, "use_model": None},
+                            _prefix_fallback_note("The default model also failed. Please try again."),
+                            [],
+                        ))
+                        return
+                    yield _ndjson(
+                        {"type": "notice", "text": FALLBACK_NOTE.strip(), "fallback": True}
+                    )
+                    continue
+                yield _ndjson(_final_event(current, _visible_text(current, text), media_items))
+                return
+            except TurnBudgetExceeded:
+                # Stop this attempt. Do not close the shared client, and do not
+                # start another long retry — the turn budget is already spent.
+                abandon = True
+                yield _ndjson(_final_event(current, _timeout_text(current), []))
+                return
+            except Exception as e:
+                if _can_fallback(current):
+                    try:
+                        current = await _retry_with_default(current)
+                    except Exception as retry_err:
+                        print(f"[bridge] default-model retry failed: {type(retry_err).__name__}")
+                        yield _ndjson(_final_event(
+                            {**current, "fell_back": True, "use_model": None},
+                            _prefix_fallback_note("The default model also failed. Please try again."),
+                            [],
+                        ))
+                        return
+                    yield _ndjson(
+                        {"type": "notice", "text": FALLBACK_NOTE.strip(), "fallback": True}
+                    )
+                    continue
+                if current.get("fell_back"):
+                    print(f"[bridge] default-model retry failed: {type(e).__name__}")
+                    yield _ndjson(_final_event(
+                        current,
+                        _prefix_fallback_note("The default model also failed. Please try again."),
+                        [],
+                    ))
+                    return
+                yield _ndjson(
+                    {
+                        "type": "error",
+                        "detail": f"Gemini request failed: {e}",
+                        "started": last is not None,
+                    }
+                )
+                return
+            finally:
+                # A cancelled stream is already unwinding. Closing it again can
+                # re-enter the generator; leaving it avoids touching the client.
+                if not abandon:
+                    await _quiet_aclose(agen)
 
     return StreamingResponse(
         gen(),

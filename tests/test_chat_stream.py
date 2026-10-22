@@ -202,7 +202,7 @@ class ChatStreamEndpointTests(unittest.TestCase):
         self.assertIn("no cookies", res.text)
 
     def test_one_shot_chat_uses_the_same_session_setup(self):
-        chat = FakeChat(reply=Frame(text="one shot"))
+        chat = FakeChat(frames=[Frame(text="one shot")], reply=Frame(text="one shot"))
 
         async def get_client():
             return FakeClient(chat)

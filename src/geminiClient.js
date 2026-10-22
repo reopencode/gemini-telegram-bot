@@ -131,6 +131,14 @@ export async function chatStream(prompt, sessionId = 'default', { model, tools, 
 
   const handle = async (ev) => {
     if (!ev || typeof ev !== 'object') return;
+    if (ev.type === 'notice') {
+      const note = typeof ev.text === 'string' ? ev.text : '';
+      if (note.trim()) {
+        sawPartial = true;
+        if (onPartial) await onPartial(note);
+      }
+      return;
+    }
     if (ev.type === 'partial') {
       sawPartial = true;
       if (onPartial) await onPartial(typeof ev.text === 'string' ? ev.text : '');

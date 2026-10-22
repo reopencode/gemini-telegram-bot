@@ -61,14 +61,28 @@ describe('thinking level helpers', () => {
     ];
     const rows = buildModelKb(models, 'pro', 'low').inline_keyboard.filter((r) => r.length);
     assert.deepEqual(rows.map((r) => r[0].callback_data), ['model:', 'model:flash', 'model:pro', 'think:low']);
+    assert.equal(rows[0][0].text, 'Default (recommended)');
     assert.equal(rows[2][0].text, '✓ Pro (limited)');
     assert.deepEqual(rows[3].map((b) => b.callback_data), ['think:low', 'think:medium', 'think:high']);
     assert.deepEqual(rows[3].map((b) => b.text), ['✓ Low', 'Medium', 'High']);
   });
 
+  test('gemini-flash and gemini-pro are marked unreliable and Default stays recommended', () => {
+    const models = [
+      { id: 'gemini-flash', display_name: 'Flash', available: true },
+      { id: 'gemini-pro', display_name: 'Pro', available: true },
+      { id: 'gemini-flash-lite', display_name: 'Flash Lite', available: true },
+    ];
+    const rows = buildModelKb(models, 'gemini-flash', 'medium').inline_keyboard.filter((r) => r.length);
+    assert.equal(rows[0][0].text, 'Default (recommended)');
+    assert.equal(rows[1][0].text, '✓ Flash · unreliable');
+    assert.equal(rows[2][0].text, 'Pro · unreliable');
+    assert.equal(rows[3][0].text, 'Flash Lite');
+  });
+
   test('level row is always present, with no model chosen', () => {
     const rows = buildModelKb([], undefined, undefined).inline_keyboard.filter((r) => r.length);
-    assert.equal(rows[0][0].text, '✓ Default');
+    assert.equal(rows[0][0].text, '✓ Default (recommended)');
     assert.equal(rows[1][1].text, '✓ Medium');
   });
 

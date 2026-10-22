@@ -1,4 +1,5 @@
 import { appendReplyContent } from './videoReply.js';
+import { defaultModelName, isUnreliableModel } from './modelChoice.js';
 
 (() => {
   const tg = window.Telegram?.WebApp;
@@ -117,10 +118,11 @@ import { appendReplyContent } from './videoReply.js';
 
   function modelLabel() {
     const id = prefs.model;
-    if (!id) return `Model · ${levelLabel(thinkingLevel())}`;
+    if (!id) return `Default · ${levelLabel(thinkingLevel())}`;
     const m = models.find((x) => x.id === id);
     const name = (m?.display_name || id).replace(/^Gemini\s*/i, '') || id;
-    return `${name} · ${levelLabel(thinkingLevel())}`;
+    const unreliable = isUnreliableModel(m || { id }) ? ' · unreliable' : '';
+    return `${name}${unreliable} · ${levelLabel(thinkingLevel())}`;
   }
 
   function refreshChrome() {
@@ -329,10 +331,14 @@ import { appendReplyContent } from './videoReply.js';
       root.appendChild(btn);
     };
     root.appendChild(renderThinkingLevels());
-    mk('Account default', 'Let Gemini choose', '', !prefs.model);
+    mk(defaultModelName(), 'Recommended. Let Gemini choose.', '', !prefs.model);
     for (const m of models) {
       const avail = m.available ? 'Available' : 'May be limited';
-      mk(m.display_name || m.id, `${m.description || ''} · ${avail}`, m.id, prefs.model === m.id);
+      const name = m.display_name || m.id;
+      const label = isUnreliableModel(m) ? `${name} · unreliable` : name;
+      const hint = isUnreliableModel(m) ? 'Often fails or hangs' : '';
+      const desc = [hint, m.description || '', avail].filter(Boolean).join(' · ');
+      mk(label, desc, m.id, prefs.model === m.id);
     }
   }
 
